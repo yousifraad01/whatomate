@@ -28,11 +28,11 @@ services:
     image: postgres:17-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: whatomate
-      POSTGRES_PASSWORD: whatomate
-      POSTGRES_DB: whatomate
+      POSTGRES_USER: ${POSTGRES_USER:-whatomate}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-whatomate}
+      POSTGRES_DB: ${POSTGRES_DB:-whatomate}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U whatomate -d whatomate"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-whatomate} -d ${POSTGRES_DB:-whatomate}"]
       interval: 10s
       timeout: 5s
       retries: 6
