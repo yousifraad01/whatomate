@@ -107,15 +107,16 @@ var exportConfigs = map[string]ExportConfig{
 		},
 	},
 	"tags": {
-		Model:          &models.Tag{},
-		Resource:       "tags",
-		AllowedColumns: []string{"name", "color", "description", "created_at"},
-		DefaultColumns: []string{"name", "color", "description"},
+		Model:    &models.Tag{},
+		Resource: "tags",
+		// models.Tag has no description column; selecting it made every tags
+		// export fail with a SQL error.
+		AllowedColumns: []string{"name", "color", "created_at"},
+		DefaultColumns: []string{"name", "color"},
 		ColumnLabels: map[string]string{
-			"name":        "Name",
-			"color":       "Color",
-			"description": "Description",
-			"created_at":  "Created At",
+			"name":       "Name",
+			"color":      "Color",
+			"created_at": "Created At",
 		},
 	},
 }
@@ -170,7 +171,7 @@ var importConfigs = map[string]ImportConfig{
 		Model:           &models.Tag{},
 		Resource:        "tags",
 		RequiredColumns: []string{"name"},
-		OptionalColumns: []string{"color", "description"},
+		OptionalColumns: []string{"color"},
 		UniqueColumn:    "name",
 	},
 }
@@ -415,8 +416,12 @@ func (a *App) ImportData(r *fastglue.Request) error {
 	}
 	defer file.Close() //nolint:errcheck
 
-	// Limit CSV file size to 10MB
+	// Limit CSV file size to 10MB. Reject oversized uploads instead of
+	// silently truncating them mid-row.
 	const maxCSVSize = 10 << 20
+	if fileHeader.Size > maxCSVSize {
+		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "CSV file exceeds the 10 MB limit", nil, "")
+	}
 	limitedReader := io.LimitReader(file, maxCSVSize+1)
 
 	// Parse CSV

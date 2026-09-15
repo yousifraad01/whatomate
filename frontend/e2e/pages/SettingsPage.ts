@@ -563,6 +563,10 @@ export class ContactsPage extends TableSettingsPage {
   }
 
   async expectContactExists(identifier: string) {
+    // The list is paginated (50 per page, most recent conversation first), so
+    // a freshly created contact is not necessarily on the first page: narrow
+    // the list with the search box before looking for the row.
+    await this.search(identifier)
     await expect(this.getContactRow(identifier)).toBeVisible()
   }
 

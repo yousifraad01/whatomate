@@ -347,8 +347,10 @@ async function loadTemplates() {
     return
   }
   try {
+    // The backend filters by "account" (not "whatsapp_account"); only
+    // approved templates can be sent, and a page holds at most 100.
     const response = await api.get('/templates', {
-      params: { whatsapp_account: form.value.whatsapp_account },
+      params: { account: form.value.whatsapp_account, status: 'APPROVED', limit: 100 },
     })
     templates.value = (response.data as any).data?.templates || []
   } catch {
@@ -373,13 +375,23 @@ async function loadCampaign() {
   }
 }
 
+// Converts an RFC 3339 timestamp to the local "YYYY-MM-DDTHH:mm" value a
+// datetime-local input expects (slicing the raw string showed UTC as local).
+function toLocalDateTimeInput(value?: string | null): string {
+  if (!value) return ''
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
 function syncForm() {
   if (!campaign.value) return
   form.value = {
     name: campaign.value.name || '',
     whatsapp_account: campaign.value.whatsapp_account || '',
     template_id: campaign.value.template_id || '',
-    scheduled_at: campaign.value.scheduled_at ? campaign.value.scheduled_at.slice(0, 16) : '',
+    scheduled_at: toLocalDateTimeInput(campaign.value.scheduled_at),
   }
 }
 
@@ -424,7 +436,9 @@ async function save() {
       name: form.value.name,
       whatsapp_account: form.value.whatsapp_account || undefined,
       template_id: form.value.template_id || undefined,
-      scheduled_at: form.value.scheduled_at || undefined,
+      // datetime-local yields "YYYY-MM-DDTHH:mm" in local time; the API
+      // decodes scheduled_at as RFC 3339 and rejected the raw value.
+      scheduled_at: form.value.scheduled_at ? new Date(form.value.scheduled_at).toISOString() : undefined,
     }
     if (isNew.value) {
       const response = await campaignsService.create(payload)
@@ -458,12 +472,12 @@ async function save() {
       hasChanges.value = false
       toast.success(t('campaigns.updated', 'Campaign updated'))
     }
-  } catch {
-    toast.error(
+  } catch (err) {
+    toast.error(getErrorMessage(err,
       isNew.value
         ? t('campaigns.createFailed', 'Failed to create campaign')
         : t('campaigns.updateFailed', 'Failed to update campaign'),
-    )
+    ))
   } finally {
     isSaving.value = false
   }

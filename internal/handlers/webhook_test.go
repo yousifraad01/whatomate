@@ -264,7 +264,7 @@ func TestUpdateMessageStatus_DeliveredUpdatesRecipient(t *testing.T) {
 	app := webhookTestApp(t)
 	_, msg, campaign, recipient := webhookTestData(t, app, models.MessageStatusSent)
 
-	app.updateMessageStatus(msg.WhatsAppMessageID, "delivered", nil)
+	app.updateMessageStatus(uuid.Nil, msg.WhatsAppMessageID, "delivered", nil)
 
 	// Verify recipient status and delivered_at
 	var updated models.BulkMessageRecipient
@@ -283,7 +283,7 @@ func TestUpdateMessageStatus_ReadUpdatesRecipient(t *testing.T) {
 	app := webhookTestApp(t)
 	_, msg, campaign, recipient := webhookTestData(t, app, models.MessageStatusDelivered)
 
-	app.updateMessageStatus(msg.WhatsAppMessageID, "read", nil)
+	app.updateMessageStatus(uuid.Nil, msg.WhatsAppMessageID, "read", nil)
 
 	// Verify recipient status and read_at
 	var updated models.BulkMessageRecipient
@@ -332,7 +332,7 @@ func TestUpdateMessageStatus_NonCampaignMessageIgnoresRecipient(t *testing.T) {
 	require.NoError(t, app.DB.Create(&msg).Error)
 
 	// Should update message status but not panic or fail
-	app.updateMessageStatus(waMsgID, "delivered", nil)
+	app.updateMessageStatus(uuid.Nil, waMsgID, "delivered", nil)
 
 	var updated models.Message
 	require.NoError(t, app.DB.First(&updated, msg.ID).Error)
@@ -344,7 +344,7 @@ func TestUpdateMessageStatus_StatusPriorityRespected(t *testing.T) {
 	_, msg, _, recipient := webhookTestData(t, app, models.MessageStatusRead)
 
 	// Attempt to downgrade from read -> delivered (should be ignored)
-	app.updateMessageStatus(msg.WhatsAppMessageID, "delivered", nil)
+	app.updateMessageStatus(uuid.Nil, msg.WhatsAppMessageID, "delivered", nil)
 
 	var updated models.BulkMessageRecipient
 	require.NoError(t, app.DB.First(&updated, recipient.ID).Error)
@@ -359,7 +359,7 @@ func TestUpdateMessageStatus_FailedUpdatesMessage(t *testing.T) {
 	errors := []WebhookStatusError{
 		{Code: 131047, Title: "Re-engagement message", Message: "Message failed to send because more than 24 hours have passed"},
 	}
-	app.updateMessageStatus(msg.WhatsAppMessageID, "failed", errors)
+	app.updateMessageStatus(uuid.Nil, msg.WhatsAppMessageID, "failed", errors)
 
 	// Verify message status and error
 	var updatedMsg models.Message
@@ -441,7 +441,7 @@ func TestUpdateMessageStatus_FailedBroadcastsErrorMessageViaWebSocket(t *testing
 	errors := []WebhookStatusError{
 		{Code: 131047, Title: "Re-engagement message", Message: "This message was not delivered to maintain healthy ecosystem engagement."},
 	}
-	app.updateMessageStatus(waMsgID, "failed", errors)
+	app.updateMessageStatus(uuid.Nil, waMsgID, "failed", errors)
 
 	// Read from the client's send channel and verify the WS broadcast
 	select {
@@ -517,7 +517,7 @@ func TestUpdateMessageStatus_DeliveredBroadcastsViaWebSocket_NoErrorMessage(t *t
 	require.Equal(t, 1, hub.GetClientCount())
 
 	// Trigger a delivered status update (no errors)
-	app.updateMessageStatus(waMsgID, "delivered", nil)
+	app.updateMessageStatus(uuid.Nil, waMsgID, "delivered", nil)
 
 	// Read from the client's send channel and verify NO error_message
 	select {

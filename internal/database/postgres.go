@@ -3,6 +3,7 @@ package database
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,7 +19,7 @@ import (
 func NewPostgres(cfg *config.DatabaseConfig, debug bool) (*gorm.DB, error) {
 	dsn := fmt.Sprintf(
 		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Name, cfg.SSLMode,
+		quoteDSNValue(cfg.Host), cfg.Port, quoteDSNValue(cfg.User), quoteDSNValue(cfg.Password), quoteDSNValue(cfg.Name), quoteDSNValue(cfg.SSLMode),
 	)
 
 	logLevel := logger.Silent
@@ -249,6 +250,11 @@ func getIndexes() []string {
 		`CREATE INDEX IF NOT EXISTS idx_agent_transfers_agent_active ON agent_transfers(agent_id, status) WHERE status = 'active'`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_transfers_team ON agent_transfers(team_id, status) WHERE team_id IS NOT NULL`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_accounts_org_phone ON whatsapp_accounts(organization_id, phone_id)`,
+		// Account names are unique per organization, not globally: the GORM tag
+		// used to put idx_wa_org_name on name alone, which let tenants collide
+		// with (and enumerate) each other's account names.
+		`DROP INDEX IF EXISTS idx_wa_org_name`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_wa_org_name ON whatsapp_accounts(organization_id, name) WHERE deleted_at IS NULL`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_templates_account_name_lang ON templates(whats_app_account, name, language)`,
 		`CREATE INDEX IF NOT EXISTS idx_keyword_rules_account ON keyword_rules(whats_app_account, is_enabled, priority DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_chatbot_flows_account ON chatbot_flows(whats_app_account, is_enabled)`,
@@ -257,7 +263,12 @@ func getIndexes() []string {
 		`CREATE INDEX IF NOT EXISTS idx_notification_rules_account ON notification_rules(whats_app_account, is_enabled)`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_account ON messages(whats_app_account, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_contacts_account ON contacts(whats_app_account)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_canned_responses_org_name ON canned_responses(organization_id, name)`,
+		// Soft-deleted rows must not block re-creating a canned response or a
+		// role with the same name (there is no restore path for these two),
+		// so the unique indexes are partial. The old non-partial definitions
+		// are dropped first because CREATE INDEX IF NOT EXISTS keeps them.
+		`DROP INDEX IF EXISTS idx_canned_responses_org_name`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_canned_responses_org_name ON canned_responses(organization_id, name) WHERE deleted_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_canned_responses_active ON canned_responses(organization_id, is_active, usage_count DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_webhooks_org_active ON webhooks(organization_id, is_active)`,
 		`CREATE INDEX IF NOT EXISTS idx_availability_logs_user_time ON user_availability_logs(user_id, started_at DESC)`,
@@ -269,7 +280,8 @@ func getIndexes() []string {
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_team_members_unique ON team_members(team_id, user_id) WHERE deleted_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_team_members_user ON team_members(user_id)`,
 		// Custom roles indexes
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_custom_roles_org_name ON custom_roles(organization_id, name)`,
+		`DROP INDEX IF EXISTS idx_custom_roles_org_name`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_custom_roles_org_name ON custom_roles(organization_id, name) WHERE deleted_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_custom_roles_org_system ON custom_roles(organization_id, is_system)`,
 		`CREATE INDEX IF NOT EXISTS idx_custom_roles_org_default ON custom_roles(organization_id, is_default) WHERE is_default = true`,
 		// GIN index for JSONB tag filtering
@@ -285,6 +297,18 @@ func getIndexes() []string {
 		// IVR flows
 		`CREATE INDEX IF NOT EXISTS idx_ivr_flows_org_active ON ivr_flows(organization_id, whatsapp_account, is_active)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_ivr_flows_org_call_start ON ivr_flows(organization_id, whatsapp_account) WHERE is_call_start = true AND is_active = true AND deleted_at IS NULL`,
+		// Dashboard widgets and analytics count messages per organization over
+		// a date range; the single-column organization_id index forced an
+		// org-wide scan for every widget.
+		`CREATE INDEX IF NOT EXISTS idx_messages_org_created ON messages(organization_id, created_at DESC)`,
+		// Unread badge counts per conversation (incoming, not yet read).
+		`CREATE INDEX IF NOT EXISTS idx_messages_contact_unread ON messages(contact_id) WHERE direction = 'incoming' AND status <> 'read' AND deleted_at IS NULL`,
+		// Campaign completion check and recipient listing filter by status.
+		`CREATE INDEX IF NOT EXISTS idx_bulk_recipients_campaign_status ON bulk_message_recipients(campaign_id, status)`,
+		// Campaign retry/recalculation looks up messages by campaign id stored in metadata.
+		`CREATE INDEX IF NOT EXISTS idx_messages_campaign_id ON messages ((metadata->>'campaign_id')) WHERE (metadata->>'campaign_id') IS NOT NULL`,
+		// Audit log listing orders by created_at within an organization.
+		`CREATE INDEX IF NOT EXISTS idx_audit_logs_org_created ON audit_logs(organization_id, created_at DESC)`,
 	}
 }
 
@@ -301,10 +325,14 @@ func CreateIndexes(db *gorm.DB) error {
 // CreateDefaultAdmin creates a default admin user if no users exist
 // This should only be called once during initial setup
 func CreateDefaultAdmin(db *gorm.DB, cfg *config.DefaultAdminConfig) error {
-	// Check if admin already exists (using email from config)
-	var existingAdmin models.User
-	if err := db.Where("email = ?", cfg.Email).First(&existingAdmin).Error; err == nil {
-		// Admin already exists, skip
+	// Initial setup only: once any user exists the configured credentials
+	// must not be able to add a second super admin (with a well-known
+	// default password) just because default_admin.email was changed.
+	var userCount int64
+	if err := db.Model(&models.User{}).Count(&userCount).Error; err != nil {
+		return fmt.Errorf("failed to count users: %w", err)
+	}
+	if userCount > 0 {
 		return nil
 	}
 
@@ -447,11 +475,24 @@ func SeedSystemRolesForAllOrgs(db *gorm.DB) error {
 		return fmt.Errorf("failed to migrate user roles: %w", err)
 	}
 
-	// Make admin@admin.com a super admin if exists
-	if err := db.Exec("UPDATE users SET is_super_admin = true WHERE email = 'admin@admin.com'").Error; err != nil {
-		return fmt.Errorf("failed to set super admin: %w", err)
-	}
+	return nil
+}
 
+// EnsureSuperAdmin promotes the configured default admin to super admin when
+// the installation has no super admin yet (legacy installs predate the flag).
+// It deliberately does nothing once any super admin exists: the previous
+// unconditional "UPDATE users SET is_super_admin = true WHERE email =
+// 'admin@admin.com'" on every migration meant that anyone able to register
+// that address became a super admin at the next restart.
+func EnsureSuperAdmin(db *gorm.DB, email string) error {
+	if email == "" {
+		return nil
+	}
+	res := db.Exec(`UPDATE users SET is_super_admin = true WHERE email = ? AND deleted_at IS NULL
+		AND NOT EXISTS (SELECT 1 FROM users su WHERE su.is_super_admin = true AND su.deleted_at IS NULL)`, email)
+	if res.Error != nil {
+		return fmt.Errorf("failed to set super admin: %w", res.Error)
+	}
 	return nil
 }
 
@@ -742,4 +783,13 @@ func SeedDefaultWidgetsForOrg(db *gorm.DB, orgID, userID uuid.UUID) error {
 	}
 
 	return nil
+}
+
+// quoteDSNValue quotes a value for the key=value connection string form so a
+// password containing spaces, quotes or backslashes cannot break the DSN or
+// inject extra parameters.
+func quoteDSNValue(v string) string {
+	v = strings.ReplaceAll(v, `\`, `\`)
+	v = strings.ReplaceAll(v, `'`, `\'`)
+	return "'" + v + "'"
 }

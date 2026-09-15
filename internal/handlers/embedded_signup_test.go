@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/shridarpatil/whatomate/internal/audit"
 	"github.com/shridarpatil/whatomate/internal/crypto"
 	"github.com/shridarpatil/whatomate/internal/models"
 	"github.com/shridarpatil/whatomate/pkg/whatsapp"
@@ -446,8 +447,8 @@ func TestApp_RegisterPhoneNumber_Success_WithPIN(t *testing.T) {
 	updated.DecryptSecrets(app.Config.App.EncryptionKey)
 	assert.Equal(t, "654321", updated.Pin)
 
-	// Verify audit log exists
-	time.Sleep(50 * time.Millisecond)
+	// Verify audit log exists (audit writes are asynchronous)
+	require.True(t, audit.Flush(5*time.Second), "audit log should be written")
 	var auditCount int64
 	require.NoError(t, app.DB.Model(&models.AuditLog{}).Where("organization_id = ? AND resource_type = ? AND action = ?", org.ID, "account", models.AuditActionUpdated).Count(&auditCount).Error)
 	assert.Greater(t, auditCount, int64(0))
@@ -519,8 +520,8 @@ func TestApp_RegisterPhoneNumber_Success_GeneratedPIN(t *testing.T) {
 	updated.DecryptSecrets(app.Config.App.EncryptionKey)
 	assert.Len(t, updated.Pin, 6)
 
-	// Verify audit log exists
-	time.Sleep(50 * time.Millisecond)
+	// Verify audit log exists (audit writes are asynchronous)
+	require.True(t, audit.Flush(5*time.Second), "audit log should be written")
 	var auditCount int64
 	require.NoError(t, app.DB.Model(&models.AuditLog{}).Where("organization_id = ? AND resource_type = ? AND action = ?", org.ID, "account", models.AuditActionUpdated).Count(&auditCount).Error)
 	assert.Greater(t, auditCount, int64(0))

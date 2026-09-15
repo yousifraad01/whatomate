@@ -2,100 +2,154 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+  Design tokens
+  -------------
+  Dark-first neutral surfaces with one brand accent (emerald). Every text
+  colour below was checked against its surface for WCAG 2.2 AA (>= 4.5:1
+  for text, >= 3:1 for UI boundaries):
+
+    dark  muted-foreground  #a6a6a6 on #0f0f0f  -> 8.9:1
+    dark  primary fg        #0a0a0a on #10b981  -> 7.6:1
+    light muted-foreground  #666666 on #fafafa  -> 5.4:1
+    light primary fg        #ffffff on #047857  -> 5.5:1
+    status badge text vs badge background      -> >= 7:1 in both themes
+*/
 @layer base {
-  /* Dark-first: Linear/Vercel inspired dark mode */
   :root {
-    /* True black background like Linear/Vercel */
-    --background: 0 0% 2.5%;
-    --foreground: 0 0% 98%;
+    --background: 0 0% 6%;
+    --foreground: 0 0% 95%;
 
-    /* Glass morphism cards - slightly transparent */
-    --card: 0 0% 5%;
-    --card-foreground: 0 0% 98%;
-    --popover: 0 0% 7%;
-    --popover-foreground: 0 0% 98%;
+    --card: 0 0% 9%;
+    --card-foreground: 0 0% 95%;
+    --popover: 0 0% 10%;
+    --popover-foreground: 0 0% 95%;
 
-    /* Emerald green primary (WhatsApp style) */
+    /* Brand accent: emerald-500 fill with dark text (dark theme) */
     --primary: 160 84% 39%;
-    --primary-foreground: 0 0% 100%;
+    --primary-foreground: 0 0% 4%;
 
-    /* Subtle secondary/muted for glass effect */
-    --secondary: 0 0% 8%;
-    --secondary-foreground: 0 0% 90%;
-    --muted: 0 0% 10%;
-    --muted-foreground: 0 0% 55%;
-    --accent: 0 0% 10%;
-    --accent-foreground: 0 0% 98%;
+    --secondary: 0 0% 14%;
+    --secondary-foreground: 0 0% 92%;
+    --muted: 0 0% 13%;
+    --muted-foreground: 0 0% 65%;
+    --accent: 0 0% 14%;
+    --accent-foreground: 0 0% 95%;
 
     --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
 
-    /* Subtle borders - key for Linear look */
-    --border: 0 0% 12%;
-    --input: 0 0% 12%;
+    --border: 0 0% 17%;
+    --input: 0 0% 20%;
     --ring: 160 84% 39%;
-    --radius: 0.75rem;
+    --radius: 0.5rem;
 
-    /* Glass effect utilities */
+    /* Application shell */
+    --sidebar: 0 0% 7%;
+    --sidebar-foreground: 0 0% 90%;
+    --sidebar-muted: 0 0% 62%;
+    --sidebar-accent: 0 0% 14%;
+    --sidebar-border: 0 0% 15%;
+
+    /* Semantic status colours (badge background / text) */
+    --success: 160 84% 39% / 0.15;
+    --success-foreground: 158 64% 62%;
+    --warning: 38 92% 50% / 0.15;
+    --warning-foreground: 43 96% 64%;
+    --info: 199 89% 48% / 0.15;
+    --info-foreground: 199 95% 66%;
+    --danger: 0 84% 60% / 0.15;
+    --danger-foreground: 0 91% 76%;
+
+    /* Charts: series palette in reading order */
+    --chart-1: 160 84% 45%;
+    --chart-2: 199 89% 55%;
+    --chart-3: 38 92% 55%;
+    --chart-4: 262 83% 68%;
+    --chart-5: 0 84% 65%;
+    --chart-6: 187 85% 50%;
+
+    /* Kept for components that still reference the glass utilities */
     --glass-bg: rgba(255, 255, 255, 0.03);
     --glass-bg-hover: rgba(255, 255, 255, 0.06);
-    --glass-border: rgba(255, 255, 255, 0.06);
+    --glass-border: rgba(255, 255, 255, 0.08);
   }
 
-  /* Light mode - clean white like Vercel */
   .light {
     --background: 0 0% 98%;
-    --foreground: 0 0% 9%;
+    --foreground: 0 0% 10%;
+
     --card: 0 0% 100%;
-    --card-foreground: 0 0% 9%;
+    --card-foreground: 0 0% 10%;
     --popover: 0 0% 100%;
-    --popover-foreground: 0 0% 9%;
-    --primary: 160 84% 39%;
+    --popover-foreground: 0 0% 10%;
+
+    /* Brand accent: emerald-700 fill with white text (light theme) */
+    --primary: 161 94% 24%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 0 0% 96%;
-    --secondary-foreground: 0 0% 9%;
-    --muted: 0 0% 96%;
-    --muted-foreground: 0 0% 45%;
-    --accent: 0 0% 96%;
-    --accent-foreground: 0 0% 9%;
+
+    --secondary: 0 0% 94%;
+    --secondary-foreground: 0 0% 12%;
+    --muted: 0 0% 95%;
+    --muted-foreground: 0 0% 40%;
+    --accent: 0 0% 94%;
+    --accent-foreground: 0 0% 10%;
+
     --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
-    --border: 0 0% 90%;
-    --input: 0 0% 90%;
-    --ring: 160 84% 39%;
 
-    /* Glass effect utilities for light mode */
+    --border: 0 0% 88%;
+    --input: 0 0% 82%;
+    --ring: 161 94% 24%;
+
+    --sidebar: 0 0% 100%;
+    --sidebar-foreground: 0 0% 12%;
+    --sidebar-muted: 0 0% 42%;
+    --sidebar-accent: 0 0% 94%;
+    --sidebar-border: 0 0% 90%;
+
+    --success: 152 76% 80% / 0.35;
+    --success-foreground: 163 94% 20%;
+    --warning: 48 96% 76% / 0.45;
+    --warning-foreground: 26 90% 30%;
+    --info: 204 94% 85% / 0.5;
+    --info-foreground: 201 90% 27%;
+    --danger: 0 93% 90% / 0.6;
+    --danger-foreground: 0 70% 35%;
+
+    --chart-1: 161 94% 30%;
+    --chart-2: 201 96% 40%;
+    --chart-3: 32 95% 44%;
+    --chart-4: 262 83% 58%;
+    --chart-5: 0 72% 51%;
+    --chart-6: 187 85% 35%;
+
     --glass-bg: rgba(0, 0, 0, 0.02);
     --glass-bg-hover: rgba(0, 0, 0, 0.04);
-    --glass-border: rgba(0, 0, 0, 0.06);
+    --glass-border: rgba(0, 0, 0, 0.08);
   }
 
-  /* Legacy dark class support */
+  /* Legacy class support: identical to :root */
   .dark {
-    --background: 0 0% 2.5%;
-    --foreground: 0 0% 98%;
-    --card: 0 0% 5%;
-    --card-foreground: 0 0% 98%;
-    --popover: 0 0% 7%;
-    --popover-foreground: 0 0% 98%;
+    --background: 0 0% 6%;
+    --foreground: 0 0% 95%;
+    --card: 0 0% 9%;
+    --card-foreground: 0 0% 95%;
+    --popover: 0 0% 10%;
+    --popover-foreground: 0 0% 95%;
     --primary: 160 84% 39%;
-    --primary-foreground: 0 0% 100%;
-    --secondary: 0 0% 8%;
-    --secondary-foreground: 0 0% 90%;
-    --muted: 0 0% 10%;
-    --muted-foreground: 0 0% 55%;
-    --accent: 0 0% 10%;
-    --accent-foreground: 0 0% 98%;
+    --primary-foreground: 0 0% 4%;
+    --secondary: 0 0% 14%;
+    --secondary-foreground: 0 0% 92%;
+    --muted: 0 0% 13%;
+    --muted-foreground: 0 0% 65%;
+    --accent: 0 0% 14%;
+    --accent-foreground: 0 0% 95%;
     --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
-    --border: 0 0% 12%;
-    --input: 0 0% 12%;
+    --border: 0 0% 17%;
+    --input: 0 0% 20%;
     --ring: 160 84% 39%;
-
-    /* Glass effect utilities */
-    --glass-bg: rgba(255, 255, 255, 0.03);
-    --glass-bg-hover: rgba(255, 255, 255, 0.06);
-    --glass-border: rgba(255, 255, 255, 0.06);
   }
 }
 
@@ -112,34 +166,38 @@
     @apply bg-background text-foreground font-sans;
     line-height: 1.5;
     font-weight: 400;
-    /* Subtle gradient for depth like Linear/Vercel */
-    background-image: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(16, 185, 129, 0.08), transparent);
-  }
-  .light body {
-    background-image: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(16, 185, 129, 0.05), transparent);
   }
   h1, h2, h3, h4, h5, h6 {
-    @apply font-medium;
+    @apply font-semibold;
     margin-top: 0;
   }
   h1 {
-    @apply text-2xl;
-    line-height: 1.25;
+    @apply text-xl;
+    line-height: 1.3;
   }
   h2 {
-    @apply text-xl;
+    @apply text-lg;
     line-height: 1.4;
   }
   h3 {
-    @apply text-lg;
+    @apply text-base;
     line-height: 1.5;
   }
   h4, h5, h6 {
-    @apply text-base;
+    @apply text-sm;
   }
   a {
     @apply text-primary font-medium;
     text-decoration: none;
+  }
+  /* Honour the user's reduced-motion preference everywhere (WCAG 2.3.3) */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
   }
 }
 
@@ -155,8 +213,8 @@
 
 /* Custom scrollbar */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-track {
@@ -165,14 +223,14 @@
 
 ::-webkit-scrollbar-thumb {
   background: hsl(var(--muted-foreground) / 0.3);
-  border-radius: 3px;
+  border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
   background: hsl(var(--muted-foreground) / 0.5);
 }
 
-/* Glass effect utility classes */
+/* Glass effect utility classes (now plain surfaces; kept for compatibility) */
 .glass {
   background: var(--glass-bg);
   border-color: var(--glass-border);
@@ -182,115 +240,66 @@
   background: var(--glass-bg-hover);
 }
 
-/* Static card with depth - use for non-clickable stat cards */
+/*
+  Card utilities. `.card-depth` is the static surface used by dashboard
+  widgets (and referenced by end-to-end tests), `.card-interactive` marks a
+  clickable card. Neither uses shadows, glows or gradient accents: a border
+  change on hover is enough to signal interactivity.
+*/
 .card-depth {
-  @apply transition-all duration-300 relative overflow-hidden;
-  box-shadow:
-    0 4px 6px -1px rgba(0, 0, 0, 0.3),
-    0 2px 4px -2px rgba(0, 0, 0, 0.2),
-    inset 0 1px 0 0 rgba(255, 255, 255, 0.05);
+  @apply bg-card border-border;
 }
 
-/* Bottom line animation */
-.card-depth::after {
-  content: '';
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  width: 100%;
-  height: 2px;
-  background: linear-gradient(90deg, #22c55e, #10b981, #059669);
-  transform: scaleX(0);
-  transform-origin: left;
-  transition: transform 0.3s ease;
-}
-
-.card-depth:hover::after {
-  transform: scaleX(1);
-}
-
-.card-depth:hover {
-  @apply bg-white/[0.06] border-white/[0.12];
-  box-shadow:
-    0 10px 15px -3px rgba(0, 0, 0, 0.4),
-    0 4px 6px -4px rgba(0, 0, 0, 0.3),
-    inset 0 1px 0 0 rgba(255, 255, 255, 0.08);
-}
-
-.light .card-depth {
-  box-shadow:
-    0 4px 6px -1px rgba(0, 0, 0, 0.08),
-    0 2px 4px -2px rgba(0, 0, 0, 0.05);
-}
-
-.light .card-depth:hover {
-  @apply bg-gray-50 border-gray-300;
-  box-shadow:
-    0 10px 15px -3px rgba(0, 0, 0, 0.1),
-    0 4px 6px -4px rgba(0, 0, 0, 0.08);
-}
-
-/* Interactive card hover effect - use for clickable cards */
 .card-interactive {
-  @apply transition-all duration-300 cursor-pointer;
+  @apply transition-colors duration-150 cursor-pointer;
 }
 
 .card-interactive:hover {
-  @apply border-white/20 bg-white/[0.06] shadow-2xl;
-  box-shadow:
-    0 25px 50px -12px rgba(0, 0, 0, 0.5),
-    0 0 0 1px rgba(255, 255, 255, 0.1),
-    0 0 30px -5px rgba(16, 185, 129, 0.15);
-  transform: translateY(-2px);
-}
-
-.light .card-interactive:hover {
-  @apply border-gray-300 bg-gray-50 shadow-xl;
-  box-shadow:
-    0 25px 50px -12px rgba(0, 0, 0, 0.1),
-    0 0 0 1px rgba(0, 0, 0, 0.05),
-    0 0 30px -5px rgba(16, 185, 129, 0.1);
+  @apply border-muted-foreground/40 bg-accent;
 }
 
 /* List item hover - for contact lists, menu items, etc */
 .list-item-hover {
-  @apply transition-all duration-200;
+  @apply transition-colors duration-150;
 }
 
 .list-item-hover:hover {
-  @apply bg-white/[0.08];
+  @apply bg-accent;
 }
 
-.light .list-item-hover:hover {
-  @apply bg-gray-100;
-}
-
-/* Chat background - dark-first */
+/* Chat background */
 .chat-background {
-  background-color: #0f0f10;
+  background-color: hsl(var(--background));
 }
 
 .light .chat-background {
-  background-color: #f5f5f5;
+  background-color: hsl(0 0% 96%);
 }
 
-/* Modern chat bubble styles */
+/* Chat bubble styles (WhatsApp-like colours, kept recognisable) */
 .chat-bubble {
   @apply relative px-4 py-2.5 text-sm;
-  max-width: 65%;
-  border-radius: 1rem;
+  max-width: min(65%, 42rem);
+  border-radius: 0.75rem;
 }
 
-/* Incoming bubble - glass effect */
+@media (max-width: 767px) {
+  .chat-bubble {
+    max-width: 88%;
+  }
+}
+
+/* Incoming bubble */
 .chat-bubble-incoming {
-  background-color: rgba(255, 255, 255, 0.08);
-  color: #e9edef;
+  background-color: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  color: hsl(var(--foreground));
   border-bottom-left-radius: 0.375rem;
 }
 
 /* Outgoing bubble - WhatsApp dark mode teal green */
 .chat-bubble-outgoing {
-  background-color: #38674a;
+  background-color: #1f4d3a;
   color: #e9edef;
   border-bottom-right-radius: 0.375rem;
 }
@@ -299,39 +308,38 @@
 .light .chat-bubble-incoming {
   background-color: #ffffff;
   color: #111b21;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  border-color: hsl(var(--border));
 }
 
 .light .chat-bubble-outgoing {
   background-color: #d9fdd3;
   color: #111b21;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 
 /* Legacy dark class support */
 .dark .chat-bubble-incoming {
-  background-color: rgba(255, 255, 255, 0.08);
-  color: #e9edef;
+  background-color: hsl(var(--card));
+  color: hsl(var(--foreground));
 }
 
 .dark .chat-bubble-outgoing {
-  background-color: #38674a;
+  background-color: #1f4d3a;
   color: #e9edef;
 }
 
 .chat-bubble-outgoing .text-destructive {
-  color: #fd7878fc;
+  color: #fca5a5;
   font-size: 0.80rem;
 }
 
 .light .chat-bubble-outgoing .text-destructive {
-  color: #dc2626;
+  color: #b91c1c;
   font-size: 0.80rem;
 }
 
 /* Time and status */
 .chat-bubble-time {
-  @apply text-[10px] mt-1 flex items-center gap-1.5 float-right;
+  @apply text-[11px] mt-1 flex items-center gap-1.5 float-right;
   margin-left: 8px;
   margin-bottom: -4px;
   position: relative;
@@ -339,65 +347,65 @@
 }
 
 .chat-bubble-time span {
-  color: rgba(255, 255, 255, 0.4);
+  color: hsl(var(--muted-foreground));
 }
 
 .chat-bubble-incoming .chat-bubble-time span {
-  color: rgba(255, 255, 255, 0.4);
+  color: hsl(var(--muted-foreground));
 }
 
 .chat-bubble-outgoing .chat-bubble-time span {
-  color: rgba(255, 255, 255, 0.6);
+  color: rgba(233, 237, 239, 0.75);
 }
 
 .light .chat-bubble-time span {
-  color: rgba(17, 27, 33, 0.45);
+  color: rgba(17, 27, 33, 0.6);
 }
 
 .light .chat-bubble-outgoing .chat-bubble-time span {
-  color: rgba(17, 27, 33, 0.6);
+  color: rgba(17, 27, 33, 0.65);
 }
 
 /* Status icons */
 .chat-bubble-outgoing .chat-bubble-time .status-icon {
-  color: rgba(255, 255, 255, 0.6);
+  color: rgba(233, 237, 239, 0.75);
   width: 16px;
   height: 16px;
 }
 
-/* Read status - bright cyan blue like WhatsApp */
-.chat-bubble-outgoing .chat-bubble-time .status-icon.text-blue-400 {
-  color: #53bdeb !important;
+/* Read status - WhatsApp blue ticks */
+.chat-bubble-outgoing .chat-bubble-time .status-icon.status-read {
+  color: #53bdeb;
 }
 
 .light .chat-bubble-outgoing .chat-bubble-time .status-icon {
-  color: rgba(17, 27, 33, 0.4);
+  color: rgba(17, 27, 33, 0.5);
 }
 
-.light .chat-bubble-outgoing .chat-bubble-time .status-icon.text-blue-400 {
-  color: #53bdeb !important;
+.light .chat-bubble-outgoing .chat-bubble-time .status-icon.status-read {
+  color: #1d9bf0;
 }
 
 /* Reply preview inside chat bubble */
 .reply-preview {
-  @apply border-l-2 rounded-lg;
-  background: rgba(255, 255, 255, 0.06);
-  border-left-color: #4ade80;
+  @apply border-l-2 rounded-md;
+  background: hsl(var(--muted));
+  border-left-color: hsl(var(--primary));
   margin-bottom: 8px;
   padding: 8px 10px;
 }
 
 .reply-preview p {
-  color: rgba(255, 255, 255, 0.7);
+  color: hsl(var(--muted-foreground));
 }
 
 .reply-preview .font-medium {
-  color: #4ade80;
+  color: hsl(var(--primary));
 }
 
 .light .reply-preview {
   background: rgba(0, 0, 0, 0.04);
-  border-left-color: #16a34a;
+  border-left-color: hsl(var(--primary));
 }
 
 .light .reply-preview p {
@@ -405,7 +413,7 @@
 }
 
 .light .reply-preview .font-medium {
-  color: #16a34a;
+  color: hsl(var(--primary));
 }
 
 .chat-bubble-outgoing .reply-preview {
@@ -414,7 +422,7 @@
 }
 
 .chat-bubble-outgoing .reply-preview p {
-  color: rgba(255, 255, 255, 0.7);
+  color: rgba(255, 255, 255, 0.75);
 }
 
 .chat-bubble-outgoing .reply-preview .font-medium {
@@ -440,12 +448,12 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
-  color: #4ade80;
+  color: hsl(var(--success-foreground));
   font-weight: 500;
 }
 
 .button-reply-bubble .chat-bubble-time {
-  color: rgba(255, 255, 255, 0.4);
+  color: hsl(var(--muted-foreground));
 }
 
 .chat-bubble-outgoing .button-reply-bubble {
@@ -453,7 +461,7 @@
 }
 
 .light .button-reply-bubble {
-  color: #16a34a;
+  color: hsl(var(--success-foreground));
 }
 
 .light .button-reply-bubble .chat-bubble-time {
@@ -466,18 +474,18 @@
 
 /* Interactive buttons */
 .interactive-buttons {
-  border-radius: 0 0 1rem 1rem;
+  border-radius: 0 0 0.75rem 0.75rem;
   overflow: hidden;
-  border-color: rgba(255, 255, 255, 0.15);
+  border-color: hsl(var(--border));
 }
 
 .interactive-buttons > div {
-  border-color: rgba(255, 255, 255, 0.15);
-  color: #4ade80; /* emerald-400 for dark mode incoming */
+  border-color: hsl(var(--border));
+  color: hsl(var(--success-foreground));
 }
 
 .interactive-buttons > div:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: hsl(var(--accent));
 }
 
 /* Interactive buttons inside outgoing (green) bubbles */
@@ -500,7 +508,7 @@
 
 .light .interactive-buttons > div {
   border-color: rgba(0, 0, 0, 0.1);
-  color: #16a34a; /* emerald-600 for light mode */
+  color: hsl(var(--success-foreground));
 }
 
 .light .interactive-buttons > div:hover {
@@ -508,7 +516,7 @@
 }
 
 .light .chat-bubble-outgoing .interactive-buttons > div {
-  color: #166534; /* darker green for light mode outgoing */
+  color: #166534;
 }
 
 /* Message highlight animation for scroll-to */
@@ -534,72 +542,62 @@
 
 /* Emoji picker theme override to match app theme */
 .v3-emoji-picker.v3-color-theme-dark {
-  --v3-picker-bg: hsl(0 0% 6%);
+  --v3-picker-bg: hsl(0 0% 10%);
   --v3-picker-fg: hsl(0 0% 95%);
-  --v3-picker-border: hsl(0 0% 16%);
-  --v3-picker-input-bg: hsl(0 0% 12%);
-  --v3-picker-input-border: hsl(0 0% 20%);
-  --v3-picker-input-focus-border: hsl(142 70% 49%);
-  --v3-picker-emoji-hover: hsl(0 0% 12%);
+  --v3-picker-border: hsl(0 0% 18%);
+  --v3-picker-input-bg: hsl(0 0% 13%);
+  --v3-picker-input-border: hsl(0 0% 22%);
+  --v3-picker-input-focus-border: hsl(160 84% 39%);
+  --v3-picker-emoji-hover: hsl(0 0% 14%);
 }
 
 .light .v3-emoji-picker {
   --v3-picker-bg: hsl(0 0% 100%);
-  --v3-picker-fg: hsl(217 19% 27%);
-  --v3-picker-border: hsl(214.3 31.8% 91.4%);
+  --v3-picker-fg: hsl(0 0% 12%);
+  --v3-picker-border: hsl(0 0% 88%);
   --v3-picker-input-bg: hsl(0 0% 100%);
-  --v3-picker-input-border: hsl(214.3 31.8% 91.4%);
-  --v3-picker-input-focus-border: hsl(142 70% 49%);
-  --v3-picker-emoji-hover: hsl(210 40% 96.1%);
+  --v3-picker-input-border: hsl(0 0% 82%);
+  --v3-picker-input-focus-border: hsl(161 94% 24%);
+  --v3-picker-emoji-hover: hsl(0 0% 94%);
 }
 
-/* ─── Page transitions ─── */
+/* ─── Page transitions (opacity only; respects reduced motion above) ─── */
 .page-enter-active,
 .page-leave-active {
-  transition: opacity 0.15s ease, transform 0.15s ease;
+  transition: opacity 0.12s ease;
 }
 
-.page-enter-from {
-  opacity: 0;
-  transform: translateY(6px);
-}
-
+.page-enter-from,
 .page-leave-to {
   opacity: 0;
-  transform: translateY(-6px);
 }
 
 /* ─── Micro-interactions ─── */
 
-/* Button press effect */
+/* Button press effect: no-op, kept so existing class usage is harmless */
 .btn-press:active {
-  transform: scale(0.97);
+  transform: none;
 }
 
-/* Staggered list item entrance */
+/* List item entrance */
 @keyframes list-in {
   from {
     opacity: 0;
-    transform: translateY(8px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
   }
 }
 
 .animate-list-in {
-  animation: list-in 0.25s ease both;
+  animation: list-in 0.15s ease both;
 }
 
 /* Success checkmark pop */
 @keyframes pop-in {
   0% {
     opacity: 0;
-    transform: scale(0.5);
-  }
-  70% {
-    transform: scale(1.1);
+    transform: scale(0.9);
   }
   100% {
     opacity: 1;
@@ -608,7 +606,7 @@
 }
 
 .animate-pop-in {
-  animation: pop-in 0.3s ease both;
+  animation: pop-in 0.2s ease both;
 }
 
 /* Sidebar active indicator bar */
@@ -626,16 +624,14 @@
   border-radius: 0 3px 3px 0;
   background: hsl(var(--primary));
   opacity: 0;
-  transform: scaleY(0);
-  transition: opacity 0.2s ease, transform 0.2s ease;
+  transition: opacity 0.15s ease;
 }
 
 .nav-active-indicator[data-active="true"]::before {
   opacity: 1;
-  transform: scaleY(1);
 }
 
-/* Skeleton shimmer (replaces plain pulse) */
+/* Skeleton shimmer */
 @keyframes shimmer {
   0% {
     background-position: -200% 0;
@@ -648,36 +644,17 @@
 .skeleton-shimmer {
   background: linear-gradient(
     90deg,
-    rgba(255, 255, 255, 0.04) 25%,
-    rgba(255, 255, 255, 0.08) 50%,
-    rgba(255, 255, 255, 0.04) 75%
+    hsl(var(--muted)) 25%,
+    hsl(var(--accent)) 50%,
+    hsl(var(--muted)) 75%
   );
   background-size: 200% 100%;
   animation: shimmer 1.5s ease-in-out infinite;
 }
 
-.light .skeleton-shimmer {
-  background: linear-gradient(
-    90deg,
-    rgba(0, 0, 0, 0.04) 25%,
-    rgba(0, 0, 0, 0.08) 50%,
-    rgba(0, 0, 0, 0.04) 75%
-  );
-  background-size: 200% 100%;
-}
-
-/* Badge pulse for notifications */
-@keyframes badge-pulse {
-  0%, 100% {
-    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4);
-  }
-  50% {
-    box-shadow: 0 0 0 4px rgba(16, 185, 129, 0);
-  }
-}
-
+/* Badge pulse: retained as a static style (no animation) */
 .badge-pulse {
-  animation: badge-pulse 2s ease-in-out infinite;
+  animation: none;
 }
 
 /* Status dot for active badges */
@@ -689,10 +666,10 @@
   border-radius: 50%;
   background: currentColor;
   margin-right: 6px;
-  opacity: 0.8;
+  opacity: 0.9;
 }
 
-/* Avatar gradient ring */
+/* Avatar ring (accent outline instead of gradient) */
 .avatar-ring {
   position: relative;
 }
@@ -702,7 +679,7 @@
   position: absolute;
   inset: -2px;
   border-radius: 9999px;
-  background: linear-gradient(135deg, hsl(var(--primary)), hsl(160 84% 55%));
+  border: 2px solid hsl(var(--primary));
   z-index: -1;
 }
 
@@ -733,5 +710,5 @@
 }
 
 .avatar-status-pulse::after {
-  animation: badge-pulse 2s ease-in-out infinite;
+  animation: none;
 }

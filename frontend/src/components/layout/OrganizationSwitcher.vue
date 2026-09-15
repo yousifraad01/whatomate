@@ -12,12 +12,13 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { organizationsService } from '@/services/api'
 import { toast } from 'vue-sonner'
-import { Building2, Plus, Loader2 } from 'lucide-vue-next'
+import { Building2, Plus } from 'lucide-vue-next'
 
-const props = defineProps<{
+defineProps<{
   collapsed?: boolean
 }>()
 
@@ -47,6 +48,8 @@ const currentOrgId = computed(() => {
   return authStore.user?.organization_id || ''
 })
 
+const currentOrgName = computed(() => orgList.value.find(o => o.id === currentOrgId.value)?.name || '')
+
 onMounted(async () => {
   // Fetch user's org memberships for all authenticated users
   await organizationsStore.fetchMyOrganizations()
@@ -70,19 +73,24 @@ watch(() => authStore.user?.is_super_admin, async (superAdmin) => {
   }
 })
 
+const isSwitching = ref(false)
+
 const handleOrgChange = async (value: string | number | bigint | Record<string, any> | null) => {
-  if (!value || typeof value !== 'string') return
+  if (!value || typeof value !== 'string' || value === currentOrgId.value) return
 
   // Everyone goes through switch-org, super admins included: the X-Organization-ID
   // header alone only scopes axios calls. The WebSocket token, <img src> media and
   // window.open previews carry no headers, so the JWT itself has to name the target
-  // org or those keep talking to the previous one.
+  // org or those keep talking to the previous one. The full reload afterwards
+  // discards every store that still holds the previous organization's data.
+  isSwitching.value = true
   try {
     await authStore.switchOrg(value)
     organizationsStore.selectOrganization(value)
     window.location.reload()
   } catch {
-    // If switch fails, don't reload
+    isSwitching.value = false
+    toast.error(t('common.error'))
   }
 }
 
@@ -92,7 +100,7 @@ const newOrgName = ref('')
 const isCreating = ref(false)
 
 async function submitCreateOrg() {
-  if (!newOrgName.value.trim()) return
+  if (!newOrgName.value.trim() || isCreating.value) return
   isCreating.value = true
   try {
     await organizationsService.create({ name: newOrgName.value.trim() })
@@ -117,29 +125,32 @@ const refreshOrgs = async () => {
 </script>
 
 <template>
-  <div v-if="shouldShowSwitcher" class="px-2 py-2 border-b">
+  <div v-if="shouldShowSwitcher" class="border-b border-sidebar-border px-2 py-2">
     <div v-if="!collapsed" class="space-y-1">
       <div class="flex items-center justify-between">
-        <span class="text-[11px] font-medium text-muted-foreground uppercase tracking-wide px-1">
-          Organization
-        </span>
+        <Label for="org-switcher" class="px-1 text-[11px] font-semibold uppercase tracking-wide text-sidebar-muted">
+          {{ t('nav.organization') }}
+        </Label>
         <Button
           v-if="canCreateOrg"
           variant="ghost"
           size="icon"
-          class="h-5 w-5"
+          class="h-6 w-6 text-sidebar-muted hover:text-sidebar-foreground"
+          :aria-label="t('nav.createOrganization')"
+          :title="t('nav.createOrganization')"
           @click="isCreateDialogOpen = true"
         >
-          <Plus class="h-3 w-3" />
+          <Plus class="h-3.5 w-3.5" aria-hidden="true" />
         </Button>
       </div>
       <Select
         v-if="orgList.length > 0"
         :model-value="currentOrgId"
+        :disabled="isSwitching"
         @update:model-value="handleOrgChange"
       >
-        <SelectTrigger class="h-8 text-[13px]">
-          <SelectValue placeholder="Select organization" />
+        <SelectTrigger id="org-switcher" class="h-8 text-[13px]" :aria-label="t('nav.selectOrganization')">
+          <SelectValue :placeholder="t('nav.selectOrganization')" />
         </SelectTrigger>
         <SelectContent>
           <SelectItem
@@ -148,33 +159,33 @@ const refreshOrgs = async () => {
             :value="org.id"
           >
             <div class="flex items-center gap-2">
-              <Building2 class="h-3.5 w-3.5 text-muted-foreground" />
+              <Building2 class="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
               <span>{{ org.name }}</span>
             </div>
           </SelectItem>
         </SelectContent>
       </Select>
-      <div v-else-if="organizationsStore.loading" class="text-[12px] text-muted-foreground px-1">
-        Loading...
+      <div v-else-if="organizationsStore.loading" class="px-1 text-xs text-sidebar-muted" role="status">
+        {{ t('common.loading') }}…
       </div>
-      <div v-else-if="organizationsStore.error" class="text-[12px] text-destructive px-1">
+      <div v-else-if="organizationsStore.error" class="px-1 text-xs text-destructive" role="alert">
         {{ organizationsStore.error }}
       </div>
-      <div v-else class="text-[12px] text-muted-foreground px-1">
-        No organizations found
+      <div v-else class="px-1 text-xs text-sidebar-muted">
+        {{ t('nav.noOrganizations') }}
       </div>
     </div>
 
-    <!-- Collapsed view - just show icon with selected org initial -->
+    <!-- Collapsed view: icon with the current organization as its name -->
     <div v-else class="flex justify-center">
-      <Button
-        variant="ghost"
-        size="icon"
-        class="h-8 w-8"
-        :title="organizationsStore.selectedOrganization?.name || 'All Organizations'"
+      <span
+        class="flex h-8 w-8 items-center justify-center rounded-md text-sidebar-muted"
+        :title="currentOrgName || t('nav.organization')"
+        :aria-label="currentOrgName || t('nav.organization')"
+        role="img"
       >
-        <Building2 class="h-4 w-4" />
-      </Button>
+        <Building2 class="h-4 w-4" aria-hidden="true" />
+      </span>
     </div>
   </div>
 
@@ -185,17 +196,18 @@ const refreshOrgs = async () => {
         <DialogTitle>{{ t('organizations.createTitle') }}</DialogTitle>
         <DialogDescription>{{ t('organizations.createDesc') }}</DialogDescription>
       </DialogHeader>
-      <div class="py-4">
+      <form class="py-2" @submit.prevent="submitCreateOrg">
+        <Label for="new-org-name" class="sr-only">{{ t('organizations.namePlaceholder') }}</Label>
         <Input
+          id="new-org-name"
           v-model="newOrgName"
           :placeholder="t('organizations.namePlaceholder')"
-          @keydown.enter="submitCreateOrg"
+          :disabled="isCreating"
         />
-      </div>
+      </form>
       <DialogFooter>
-        <Button variant="outline" @click="isCreateDialogOpen = false">{{ t('common.cancel') }}</Button>
-        <Button @click="submitCreateOrg" :disabled="isCreating || !newOrgName.trim()">
-          <Loader2 v-if="isCreating" class="h-4 w-4 mr-2 animate-spin" />
+        <Button variant="outline" :disabled="isCreating" @click="isCreateDialogOpen = false">{{ t('common.cancel') }}</Button>
+        <Button :loading="isCreating" :disabled="!newOrgName.trim()" @click="submitCreateOrg">
           {{ t('common.create') }}
         </Button>
       </DialogFooter>

@@ -3,21 +3,23 @@ import type { HTMLAttributes } from 'vue'
 import { cn } from '@/lib/utils'
 import { cva, type VariantProps } from 'class-variance-authority'
 
+// Status badges rely on the semantic tokens in index.css so text stays
+// readable (>= 7:1) in both themes. Colour is never the only signal: callers
+// pair a variant with a label (and often an icon), which is why the badge
+// itself carries text rather than a bare colour swatch.
 const badgeVariants = cva(
-  'inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2',
+  'inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs font-medium whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
   {
     variants: {
       variant: {
-        // Modern opacity-based badges like Linear/Vercel
-        default: 'border-transparent bg-emerald-500/20 text-emerald-400 light:bg-emerald-100 light:text-emerald-700',
-        secondary: 'border-transparent bg-white/[0.08] text-white/70 light:bg-gray-100 light:text-gray-700',
-        destructive: 'border-transparent bg-red-500/20 text-red-400 light:bg-red-100 light:text-red-700',
-        outline: 'border-white/20 text-white/70 light:border-gray-200 light:text-gray-700',
-        // Status badges with glow effect
-        success: 'border-transparent bg-emerald-500/20 text-emerald-400 light:bg-emerald-100 light:text-emerald-700',
-        warning: 'border-transparent bg-amber-500/20 text-amber-400 light:bg-amber-100 light:text-amber-700',
-        info: 'border-transparent bg-blue-500/20 text-blue-400 light:bg-blue-100 light:text-blue-700',
-        active: 'border-transparent bg-emerald-500/20 text-emerald-400 badge-pulse light:bg-emerald-100 light:text-emerald-700'
+        default: 'border-transparent bg-success text-success-foreground',
+        secondary: 'border-transparent bg-secondary text-secondary-foreground',
+        destructive: 'border-transparent bg-danger text-danger-foreground',
+        outline: 'border-border text-foreground',
+        success: 'border-transparent bg-success text-success-foreground',
+        warning: 'border-transparent bg-warning text-warning-foreground',
+        info: 'border-transparent bg-info text-info-foreground',
+        active: 'border-transparent bg-success text-success-foreground'
       }
     },
     defaultVariants: {
@@ -35,7 +37,7 @@ const props = defineProps<{
 </script>
 
 <template>
-  <div :class="cn(badgeVariants({ variant }), props.class)">
+  <span :class="cn(badgeVariants({ variant }), props.class)">
     <slot />
-  </div>
+  </span>
 </template>

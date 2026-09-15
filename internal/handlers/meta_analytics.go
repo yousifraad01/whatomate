@@ -121,7 +121,7 @@ func (a *App) GetMetaAnalytics(r *fastglue.Request) error {
 
 	// Convert dates to Unix timestamps
 	startUnix := startDate.Unix()
-	endUnix := endDate.Add(24*time.Hour - time.Second).Unix() // End of day
+	endUnix := endDate.Unix() // parseDateRange already moved endDate to the end of its day
 
 	// Get accounts to query
 	var accounts []models.WhatsAppAccount

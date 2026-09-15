@@ -3,8 +3,10 @@ package handlers
 import (
 	"context"
 	"errors"
+	"hash/fnv"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -44,12 +46,70 @@ type App struct {
 	S3Client *storage.S3Client
 	// wg tracks background goroutines for graceful shutdown
 	wg sync.WaitGroup
+	// webhookSem bounds how many inbound webhook events are processed at
+	// once so a burst of delivery/read callbacks cannot exhaust the DB pool.
+	webhookSem     chan struct{}
+	webhookSemOnce sync.Once
+	// inflightMessages holds WhatsApp message IDs currently being processed
+	// by this instance, so duplicate deliveries arriving concurrently are
+	// dropped before either copy is saved.
+	inflightMessages sync.Map
+	// contactLocks serializes inbound processing per conversation (striped by
+	// a hash of phone_number_id + sender) so two messages from one contact
+	// cannot advance the same chatbot session concurrently and lose state.
+	contactLocks [contactLockStripes]sync.Mutex
 }
 
-// WaitForBackgroundTasks blocks until all background goroutines complete.
-// Call this during graceful shutdown to ensure all async work finishes.
-func (a *App) WaitForBackgroundTasks() {
-	a.wg.Wait()
+// contactLockStripes bounds the memory used for per-conversation locks.
+const contactLockStripes = 512
+
+// lockConversation acquires the stripe lock for one contact on one account and
+// returns the unlock function.
+func (a *App) lockConversation(phoneNumberID, from string) func() {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(phoneNumberID))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(from))
+	mu := &a.contactLocks[h.Sum32()%contactLockStripes]
+	mu.Lock()
+	return mu.Unlock
+}
+
+// webhookConcurrency caps concurrently processed inbound webhook events. It
+// is deliberately below the default database pool size (25) so API requests
+// keep getting connections during a status-callback burst.
+const webhookConcurrency = 16
+
+// spawn runs fn on a tracked goroutine gated by the webhook semaphore. Meta
+// expects a fast 200, so the HTTP handler never blocks: excess events wait in
+// parked goroutines rather than in the request, and shutdown waits for them
+// via WaitForBackgroundTasks.
+func (a *App) spawn(fn func()) {
+	a.webhookSemOnce.Do(func() { a.webhookSem = make(chan struct{}, webhookConcurrency) })
+	a.wg.Add(1)
+	go func() {
+		defer a.wg.Done()
+		a.webhookSem <- struct{}{}
+		defer func() { <-a.webhookSem }()
+		fn()
+	}()
+}
+
+// WaitForBackgroundTasks blocks until all background goroutines complete or
+// the timeout elapses. It returns false when the timeout was hit. Call this
+// during graceful shutdown, after the HTTP server stopped accepting requests.
+func (a *App) WaitForBackgroundTasks(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		a.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // getOrgID extracts organization ID from request context (set by auth middleware)
@@ -84,7 +144,7 @@ func (a *App) getOrgID(r *fastglue.Request) (uuid.UUID, error) {
 			if a.IsSuperAdmin(userID) {
 				// Super admins can access any org
 				var count int64
-				if err := a.DB.Table("organizations").Where("id = ?", parsedOrgID).Count(&count).Error; err == nil && count > 0 {
+				if err := a.DB.Table("organizations").Where("id = ? AND deleted_at IS NULL", parsedOrgID).Count(&count).Error; err == nil && count > 0 {
 					return parsedOrgID, nil
 				}
 			} else {

@@ -75,6 +75,14 @@ const WS_TYPE_CALL_TRANSFER_CONNECTED = 'call_transfer_connected'
 const WS_TYPE_CALL_TRANSFER_COMPLETED = 'call_transfer_completed'
 const WS_TYPE_CALL_TRANSFER_ABANDONED = 'call_transfer_abandoned'
 const WS_TYPE_CALL_TRANSFER_NO_ANSWER = 'call_transfer_no_answer'
+const WS_TYPE_CALL_TRANSFER_REASSIGNED = 'call_transfer_reassigned'
+
+// Call hold types
+const WS_TYPE_CALL_HOLD = 'call_hold'
+const WS_TYPE_CALL_RESUMED = 'call_resumed'
+
+// Call permission types
+const WS_TYPE_CALL_PERMISSION_UPDATE = 'call_permission_update'
 
 // Outgoing call types
 const WS_TYPE_OUTGOING_CALL_INITIATED = 'outgoing_call_initiated'
@@ -264,6 +272,10 @@ class WebSocketService {
         case WS_TYPE_CALL_TRANSFER_COMPLETED:
         case WS_TYPE_CALL_TRANSFER_ABANDONED:
         case WS_TYPE_CALL_TRANSFER_NO_ANSWER:
+        case WS_TYPE_CALL_TRANSFER_REASSIGNED:
+        case WS_TYPE_CALL_HOLD:
+        case WS_TYPE_CALL_RESUMED:
+        case WS_TYPE_CALL_PERMISSION_UPDATE:
           useCallingStore().handleCallEvent(message.type, message.payload)
           break
         case WS_TYPE_OUTGOING_CALL_INITIATED:

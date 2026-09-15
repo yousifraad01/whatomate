@@ -139,11 +139,15 @@ export const useCallingStore = defineStore('calling', () => {
     ivrFlows.value = ivrFlows.value.filter(f => f.id !== id)
   }
 
-  // ICE server config (fetched from backend)
+  // ICE server config (fetched from backend). TURN credentials minted by the
+  // server are time-limited, so the list is only reused briefly and a failed
+  // fetch is never cached.
   let cachedICEServers: RTCIceServer[] | null = null
+  let cachedICEServersAt = 0
+  const ICE_SERVERS_TTL_MS = 5 * 60 * 1000
 
   async function getICEServers(): Promise<RTCIceServer[]> {
-    if (cachedICEServers) return cachedICEServers
+    if (cachedICEServers && Date.now() - cachedICEServersAt < ICE_SERVERS_TTL_MS) return cachedICEServers
     try {
       const response = await outgoingCallsService.getICEServers()
       const data = response.data as any
@@ -152,10 +156,11 @@ export const useCallingStore = defineStore('calling', () => {
         urls: s.urls,
         ...(s.username && { username: s.username, credential: s.credential }),
       }))
+      cachedICEServersAt = Date.now()
+      return cachedICEServers!
     } catch {
-      cachedICEServers = []
+      return cachedICEServers ?? []
     }
-    return cachedICEServers!
   }
 
   // Call Transfer actions
@@ -239,16 +244,26 @@ export const useCallingStore = defineStore('calling', () => {
       throw new Error('Failed to generate SDP offer')
     }
 
-    // Send offer to server, get answer
-    const response = await callTransfersService.connect(id, sdpOffer)
-    const data = response.data as any
-    const sdpAnswer = data.data?.sdp_answer ?? data.sdp_answer
+    // Send offer to server, get answer. If the server refuses (already
+    // accepted, not a team member, calling disabled) release the microphone
+    // and peer connection and put the transfer back in the waiting list.
+    try {
+      const response = await callTransfersService.connect(id, sdpOffer)
+      const data = response.data as any
+      const sdpAnswer = data.data?.sdp_answer ?? data.sdp_answer
 
-    // Set remote description
-    await pc.setRemoteDescription(new RTCSessionDescription({
-      type: 'answer',
-      sdp: sdpAnswer
-    }))
+      // Set remote description
+      await pc.setRemoteDescription(new RTCSessionDescription({
+        type: 'answer',
+        sdp: sdpAnswer
+      }))
+    } catch (err) {
+      cleanup()
+      if (transfer && !waitingTransfers.value.some(t => t.id === id)) {
+        waitingTransfers.value.push(transfer)
+      }
+      throw err
+    }
 
     // Transfer is now connected — use the snapshot taken before the API call
     if (transfer) {
@@ -327,21 +342,28 @@ export const useCallingStore = defineStore('calling', () => {
       throw new Error('Failed to generate SDP offer')
     }
 
-    // Send to server
-    const response = await outgoingCallsService.initiate({
-      contact_id: contactId,
-      whatsapp_account: whatsappAccount,
-      sdp_offer: sdpOffer,
-    })
-    const data = response.data as any
-    const callLogId = data.data?.call_log_id ?? data.call_log_id
-    const sdpAnswer = data.data?.sdp_answer ?? data.sdp_answer
+    // Send to server. On failure release the microphone and peer connection
+    // instead of leaving the browser's recording indicator on.
+    let callLogId: string
+    try {
+      const response = await outgoingCallsService.initiate({
+        contact_id: contactId,
+        whatsapp_account: whatsappAccount,
+        sdp_offer: sdpOffer,
+      })
+      const data = response.data as any
+      callLogId = data.data?.call_log_id ?? data.call_log_id
+      const sdpAnswer = data.data?.sdp_answer ?? data.sdp_answer
 
-    // Set remote description
-    await pc.setRemoteDescription(new RTCSessionDescription({
-      type: 'answer',
-      sdp: sdpAnswer,
-    }))
+      // Set remote description
+      await pc.setRemoteDescription(new RTCSessionDescription({
+        type: 'answer',
+        sdp: sdpAnswer,
+      }))
+    } catch (err) {
+      cleanup()
+      throw err
+    }
 
     // Update state
     outgoingCallLogId.value = callLogId
@@ -416,6 +438,23 @@ export const useCallingStore = defineStore('calling', () => {
     isOnHold.value = false
   }
 
+  // Whether an org-wide call event refers to the call this agent is on.
+  // Payloads carry call_log_id (hold/resume/outgoing, and call_ended for
+  // logged calls) and/or contact_id (incoming call events).
+  function isCurrentCall(payload: any): boolean {
+    const currentLogId = outgoingCallLogId.value ?? activeTransfer.value?.call_log_id
+    if (payload?.call_log_id && currentLogId) return payload.call_log_id === currentLogId
+    if (payload?.contact_id && activeTransfer.value?.contact_id) return payload.contact_id === activeTransfer.value.contact_id
+    return false
+  }
+
+  // Outgoing-call events always carry call_log_id. Before initiate() has
+  // returned the id is unknown, so status updates are applied optimistically.
+  function isCurrentOutgoingCall(payload: any): boolean {
+    if (!outgoingCallLogId.value) return true
+    return payload?.call_log_id === outgoingCallLogId.value
+  }
+
   function cleanup() {
     if (durationTimer) {
       clearInterval(durationTimer)
@@ -475,35 +514,41 @@ export const useCallingStore = defineStore('calling', () => {
           cleanup()
         }
         break
+      case 'call_transfer_reassigned':
+        // Rotated away from this agent; a fresh call_transfer_waiting arrives
+        // if the transfer is offered to us again.
+        waitingTransfers.value = waitingTransfers.value.filter(t => t.id !== payload.id)
+        break
       case 'call_hold':
-        if (isOnCall.value) {
+        if (isOnCall.value && isCurrentCall(payload)) {
           isOnHold.value = true
         }
         break
       case 'call_resumed':
-        if (isOnCall.value) {
+        if (isOnCall.value && isCurrentCall(payload)) {
           isOnHold.value = false
         }
         break
       case 'call_ended':
-        // If the agent is on a call that just ended, clean up
-        if (isOnCall.value) {
+        // Events are broadcast to the whole organization: only tear down the
+        // call this agent is actually on, never a colleague's.
+        if (isOnCall.value && isCurrentCall(payload)) {
           cleanup()
         }
         fetchCallLogs()
         break
       // Outgoing call events
       case 'outgoing_call_ringing':
-        outgoingCallStatus.value = 'ringing'
+        if (isCurrentOutgoingCall(payload)) outgoingCallStatus.value = 'ringing'
         break
       case 'outgoing_call_answered':
-        outgoingCallStatus.value = 'answered'
+        if (isCurrentOutgoingCall(payload)) outgoingCallStatus.value = 'answered'
         break
       case 'outgoing_call_rejected':
-        cleanup()
-        break
       case 'outgoing_call_ended':
-        cleanup()
+        if (outgoingCallLogId.value && isCurrentOutgoingCall(payload)) {
+          cleanup()
+        }
         break
       case 'call_permission_update': {
         const t = i18n.global.t

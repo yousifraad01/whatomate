@@ -15,19 +15,20 @@ const props = defineProps<EmptyStateProps>()
 
 <template>
   <div
-    :class="cn('flex flex-col items-center justify-center py-12 px-4 text-center', props.class)"
+    :class="cn('flex flex-col items-center justify-center px-4 py-12 text-center', props.class)"
     role="status"
     aria-live="polite"
   >
     <div
       v-if="props.icon || $slots.icon"
-      class="mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-primary/10 to-primary/5 ring-1 ring-primary/10"
+      class="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-muted text-muted-foreground"
+      aria-hidden="true"
     >
       <slot name="icon">
-        <component :is="props.icon" class="h-7 w-7 text-primary/60" />
+        <component :is="props.icon" class="h-6 w-6" />
       </slot>
     </div>
-    <h3 v-if="props.title || $slots.title" class="text-lg font-semibold text-foreground">
+    <h3 v-if="props.title || $slots.title" class="text-base font-semibold text-foreground">
       <slot name="title">{{ props.title }}</slot>
     </h3>
     <p

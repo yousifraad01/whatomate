@@ -528,12 +528,12 @@ async function save() {
       await loadTemplate()
       auditRefreshKey.value++
     }
-  } catch {
-    toast.error(
+  } catch (err) {
+    toast.error(getErrorMessage(err,
       isNew.value
         ? t('templates.createFailed', 'Failed to create template')
         : t('templates.updateFailed', 'Failed to update template')
-    )
+    ))
   } finally {
     isSaving.value = false
   }

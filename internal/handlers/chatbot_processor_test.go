@@ -435,7 +435,7 @@ func TestIsWithinBusinessHours_WithinHours(t *testing.T) {
 		},
 	}
 
-	result := app.isWithinBusinessHours(hours)
+	result := app.isWithinBusinessHours(uuid.Nil, hours)
 	assert.True(t, result)
 }
 
@@ -458,7 +458,7 @@ func TestIsWithinBusinessHours_OutsideHours(t *testing.T) {
 	// This will only be true if running at midnight; for all practical purposes it tests false
 	currentTime := now.Format("15:04")
 	if currentTime > "00:01" {
-		result := app.isWithinBusinessHours(hours)
+		result := app.isWithinBusinessHours(uuid.Nil, hours)
 		assert.False(t, result)
 	}
 }
@@ -477,7 +477,7 @@ func TestIsWithinBusinessHours_DayDisabled(t *testing.T) {
 		},
 	}
 
-	result := app.isWithinBusinessHours(hours)
+	result := app.isWithinBusinessHours(uuid.Nil, hours)
 	assert.False(t, result)
 }
 
@@ -496,14 +496,14 @@ func TestIsWithinBusinessHours_NoMatchingDay(t *testing.T) {
 		},
 	}
 
-	result := app.isWithinBusinessHours(hours)
+	result := app.isWithinBusinessHours(uuid.Nil, hours)
 	assert.False(t, result)
 }
 
 func TestIsWithinBusinessHours_EmptyHours(t *testing.T) {
 	app := newProcessorTestApp(t)
 
-	result := app.isWithinBusinessHours(models.JSONBArray{})
+	result := app.isWithinBusinessHours(uuid.Nil, models.JSONBArray{})
 	assert.False(t, result)
 }
 

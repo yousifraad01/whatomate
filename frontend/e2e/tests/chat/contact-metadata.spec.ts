@@ -91,7 +91,7 @@ test.describe('Contact Metadata Panel', () => {
     await openInfoPanel(page)
 
     // "Orders" section header (formatted from "orders")
-    await expect(page.getByText('Orders')).toBeVisible()
+    await expect(page.getByRole('button', { name: /^Orders/ }).first()).toBeVisible()
 
     // Table should show the count
     await expect(page.getByText('(2)')).toBeVisible()
@@ -127,7 +127,7 @@ test.describe('Contact Metadata Panel', () => {
     await expect(page.getByText('Active')).toBeVisible()
 
     // Boolean true should show as "Yes" badge
-    await expect(page.getByText('Yes')).toBeVisible()
+    await expect(page.getByText('Yes', { exact: true }).first()).toBeVisible()
   })
 
   test('should collapse and expand metadata sections', async ({ page }) => {

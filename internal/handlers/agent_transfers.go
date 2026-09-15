@@ -643,6 +643,13 @@ func (a *App) ResumeFromTransfer(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Transfer is not active", nil, "")
 	}
 
+	// Only the agent handling the conversation, or a user with transfers:write,
+	// may hand it back to the bot.
+	isOwner := transfer.AgentID != nil && *transfer.AgentID == userID
+	if !isOwner && !a.HasPermission(userID, models.ResourceTransfers, models.ActionWrite, orgID) {
+		return r.SendErrorEnvelope(fasthttp.StatusForbidden, "Insufficient permissions", nil, "")
+	}
+
 	// Update transfer
 	now := time.Now()
 	transfer.Status = models.TransferStatusResumed
@@ -774,9 +781,24 @@ func (a *App) AssignAgentTransfer(r *fastglue.Request) error {
 		a.UpdateSLAOnPickup(&transfer)
 	}
 
-	if err := a.DB.Save(&transfer).Error; err != nil {
-		a.Log.Error("Failed to assign transfer", "error", err, "transfer_id", transfer.ID)
+	// Write conditionally on the state read above. A plain Save would let two
+	// agents self-assign the same transfer (last writer wins) and would also
+	// overwrite columns the SLA processor may have changed meanwhile.
+	assignQuery := a.DB.Model(&models.AgentTransfer{}).
+		Where("id = ? AND status = ?", transfer.ID, models.TransferStatusActive)
+	if !hasWriteAccess {
+		// Self-assignment may only claim a transfer nobody else has taken.
+		assignQuery = assignQuery.Where("agent_id IS NULL")
+	}
+	res := assignQuery.
+		Select("agent_id", "team_id", "picked_up_at", "sla_breached", "sla_breached_at").
+		Updates(&transfer)
+	if res.Error != nil {
+		a.Log.Error("Failed to assign transfer", "error", res.Error, "transfer_id", transfer.ID)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to assign transfer", nil, "")
+	}
+	if res.RowsAffected == 0 {
+		return r.SendErrorEnvelope(fasthttp.StatusConflict, "Transfer was already taken by another agent", nil, "")
 	}
 
 	// Update contact assignment using the same rule as pickup / auto-assign:
@@ -1229,7 +1251,7 @@ func (a *App) createTransferToQueue(account *models.WhatsAppAccount, contact *mo
 	// chatbot-disabled fallback would otherwise hand off to a human at
 	// 11pm. createTransferFromKeyword already does this; mirror it here.
 	if settings != nil && settings.BusinessHours.Enabled && len(settings.BusinessHours.Hours) > 0 {
-		if !a.isWithinBusinessHours(settings.BusinessHours.Hours) {
+		if !a.isWithinBusinessHours(account.OrganizationID, settings.BusinessHours.Hours) {
 			a.Log.Info("Outside business hours, sending out-of-hours message instead of queue transfer", "contact_id", contact.ID, "source", source)
 			if settings.BusinessHours.OutOfHoursMessage != "" {
 				_ = a.sendAndSaveTextMessage(account, contact, settings.BusinessHours.OutOfHoursMessage)
@@ -1268,7 +1290,7 @@ func (a *App) createTransferFromKeyword(account *models.WhatsAppAccount, contact
 
 	// Check business hours - if outside hours, send out of hours message instead of transfer
 	if settings != nil && settings.BusinessHours.Enabled && len(settings.BusinessHours.Hours) > 0 {
-		if !a.isWithinBusinessHours(settings.BusinessHours.Hours) {
+		if !a.isWithinBusinessHours(account.OrganizationID, settings.BusinessHours.Hours) {
 			a.Log.Info("Outside business hours, sending out of hours message instead of transfer", "contact_id", contact.ID)
 			if settings.BusinessHours.OutOfHoursMessage != "" {
 				_ = a.sendAndSaveTextMessage(account, contact, settings.BusinessHours.OutOfHoursMessage)
@@ -1321,12 +1343,23 @@ func (a *App) createTransferToTeam(account *models.WhatsAppAccount, contact *mod
 		return
 	}
 
+	// The team id comes from flow/keyword configuration; it must belong to
+	// this organization, otherwise the transfer would be routed to another
+	// tenant's agents (who could never see it).
+	var teamCount int64
+	if err := a.DB.Model(&models.Team{}).Where("id = ? AND organization_id = ?", teamID, account.OrganizationID).Count(&teamCount).Error; err != nil || teamCount == 0 {
+		a.Log.Warn("Transfer target team not found in organization, falling back to general queue",
+			"team_id", teamID, "org_id", account.OrganizationID, "error", err)
+		a.createTransferToQueue(account, contact, source)
+		return
+	}
+
 	settings, _ := a.getChatbotSettingsCached(account.OrganizationID, account.Name)
 
 	// Suppress transfers outside business hours (same reason as
 	// createTransferToQueue / createTransferFromKeyword).
 	if settings != nil && settings.BusinessHours.Enabled && len(settings.BusinessHours.Hours) > 0 {
-		if !a.isWithinBusinessHours(settings.BusinessHours.Hours) {
+		if !a.isWithinBusinessHours(account.OrganizationID, settings.BusinessHours.Hours) {
 			a.Log.Info("Outside business hours, sending out-of-hours message instead of team transfer", "contact_id", contact.ID, "team_id", teamID, "source", source)
 			if settings.BusinessHours.OutOfHoursMessage != "" {
 				_ = a.sendAndSaveTextMessage(account, contact, settings.BusinessHours.OutOfHoursMessage)

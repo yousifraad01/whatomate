@@ -46,34 +46,38 @@ func processTemplate(template string, data map[string]any) string {
 	return result
 }
 
-// processForLoops handles {{for item in items}}...{{endfor}} blocks
+// processForLoops handles {{for item in items}}...{{endfor}} blocks.
+//
+// All blocks are located up front and expanded in a single pass. The expanded
+// output is never rescanned: a data value that itself contains a
+// "{{for ...}}...{{endfor}}" block (for example a WhatsApp Flow answer stored
+// into the session) is emitted verbatim instead of being expanded again, which
+// previously made this function grow the string forever.
 func processForLoops(template string, data map[string]any) string {
-	result := template
+	matches := forLoopPattern.FindAllStringSubmatchIndex(template, -1)
+	if len(matches) == 0 {
+		return template
+	}
 
-	for {
-		match := forLoopPattern.FindStringSubmatchIndex(result)
-		if match == nil {
-			break
-		}
+	var result strings.Builder
+	last := 0
+	for _, match := range matches {
+		result.WriteString(template[last:match[0]])
+		last = match[1]
 
 		// Extract loop parts
-		fullMatch := result[match[0]:match[1]]
-		itemVar := result[match[2]:match[3]]
-		arrayPath := result[match[4]:match[5]]
-		loopBody := result[match[6]:match[7]]
+		itemVar := template[match[2]:match[3]]
+		arrayPath := template[match[4]:match[5]]
+		loopBody := template[match[6]:match[7]]
 
 		// Get the array from data
 		arrayValue := getNestedValue(data, arrayPath)
 
-		var output strings.Builder
-
-		// Process each item in the array
+		// Process each item in the array. If the value is empty or not an
+		// array, the block is simply removed.
 		switch arr := arrayValue.(type) {
 		case []any:
-			iterations := len(arr)
-			if iterations > maxLoopIterations {
-				iterations = maxLoopIterations
-			}
+			iterations := min(len(arr), maxLoopIterations)
 			for i := 0; i < iterations; i++ {
 				// Create a new data context with the loop variable
 				loopData := copyMap(data)
@@ -83,14 +87,11 @@ func processForLoops(template string, data map[string]any) string {
 				// Process the loop body with the loop context
 				processedBody := processConditionals(loopBody, loopData)
 				processedBody = processVariables(processedBody, loopData)
-				output.WriteString(processedBody)
+				result.WriteString(processedBody)
 			}
 
 		case []map[string]any:
-			iterations := len(arr)
-			if iterations > maxLoopIterations {
-				iterations = maxLoopIterations
-			}
+			iterations := min(len(arr), maxLoopIterations)
 			for i := 0; i < iterations; i++ {
 				loopData := copyMap(data)
 				loopData[itemVar] = arr[i]
@@ -98,18 +99,13 @@ func processForLoops(template string, data map[string]any) string {
 
 				processedBody := processConditionals(loopBody, loopData)
 				processedBody = processVariables(processedBody, loopData)
-				output.WriteString(processedBody)
+				result.WriteString(processedBody)
 			}
 		}
-
-		// Replace the for block with the output
-		result = result[:match[0]] + output.String() + result[match[1]:]
-
-		// If no output was generated (empty or non-array), the block is just removed
-		_ = fullMatch // used for debugging
 	}
+	result.WriteString(template[last:])
 
-	return result
+	return result.String()
 }
 
 // processConditionals handles {{if condition}}...{{else}}...{{endif}} blocks

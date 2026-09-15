@@ -240,6 +240,7 @@ func (a *App) processCallWebhook(phoneNumberID string, call any) {
 		}
 		a.broadcastCallEvent(account.OrganizationID, websocket.TypeCallEnded, map[string]any{
 			"call_id":         ce.ID,
+			"call_log_id":     callLog.ID.String(),
 			"contact_id":      contact.ID.String(),
 			"status":          string(finalStatus),
 			"duration":        duration,
@@ -255,10 +256,11 @@ func (a *App) processCallWebhook(phoneNumberID string, call any) {
 		})
 
 		a.broadcastCallEvent(account.OrganizationID, websocket.TypeCallEnded, map[string]any{
-			"call_id":    ce.ID,
-			"contact_id": contact.ID.String(),
-			"status":     string(models.CallStatusMissed),
-			"ended_at":   now.Format(time.RFC3339),
+			"call_id":     ce.ID,
+			"call_log_id": callLog.ID.String(),
+			"contact_id":  contact.ID.String(),
+			"status":      string(models.CallStatusMissed),
+			"ended_at":    now.Format(time.RFC3339),
 		})
 
 	default:

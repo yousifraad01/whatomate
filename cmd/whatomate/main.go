@@ -2,16 +2,21 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
+	_ "time/tzdata" // IANA zone data for org time zones on images without tzdata
 
 	"github.com/redis/go-redis/v9"
 	"github.com/shridarpatil/whatomate/internal/assignment"
+	"github.com/shridarpatil/whatomate/internal/audit"
 	"github.com/shridarpatil/whatomate/internal/calling"
 	"github.com/shridarpatil/whatomate/internal/config"
 	"github.com/shridarpatil/whatomate/internal/database"
@@ -45,6 +50,8 @@ func main() {
 		runServer(os.Args[2:])
 	case "worker":
 		runWorker(os.Args[2:])
+	case "healthcheck":
+		runHealthcheck(os.Args[2:])
 	case "version":
 		fmt.Printf("Whatomate %s (built %s)\n", Version, BuildTime)
 	case "help", "-h", "--help":
@@ -63,10 +70,11 @@ Usage:
   whatomate <command> [options]
 
 Commands:
-  server    Start the API server (with optional embedded workers)
-  worker    Start background workers only (no API server)
-  version   Show version information
-  help      Show this help message
+  server       Start the API server (with optional embedded workers)
+  worker       Start background workers only (no API server)
+  healthcheck  Probe the /health endpoint (exit 1 on failure; for containers)
+  version      Show version information
+  help         Show this help message
 
 Server Options:
   -config string    Path to config file (default "config.toml")
@@ -76,6 +84,10 @@ Server Options:
 Worker Options:
   -config string    Path to config file (default "config.toml")
   -workers int      Number of workers to run (default 1)
+
+Healthcheck Options:
+  -url string       Health endpoint (default "http://127.0.0.1:8080/health")
+  -timeout duration Request timeout (default 5s)
 
 Examples:
   whatomate server                     # API + 1 embedded worker
@@ -122,8 +134,22 @@ func runServer(args []string) {
 	if cfg.App.Environment == "production" && len(cfg.JWT.Secret) < 32 {
 		lo.Fatal("JWT secret must be at least 32 characters in production")
 	}
+	if cfg.App.Environment == "production" && cfg.JWT.Secret == exampleJWTSecret {
+		lo.Fatal("jwt.secret still has the value from config.example.toml; anyone could forge tokens. Set a private secret.")
+	}
 	if cfg.JWT.Secret == "" {
+		// Generate a secret rather than signing with an empty key, which would
+		// let anyone forge tokens.
+		cfg.JWT.Secret = randomHex(32)
 		lo.Warn("JWT secret is empty, using a random secret (tokens will not persist across restarts)")
+	}
+	if cfg.App.Environment == "production" {
+		if cfg.App.EncryptionKey == "" {
+			lo.Error("app.encryption_key is empty: WhatsApp tokens, app secrets and API keys are stored unencrypted. Set a 32+ character key.")
+		}
+		if cfg.DefaultAdmin.Password == "admin" {
+			lo.Error("default_admin.password is the well-known default; change the admin password if that account still uses it.")
+		}
 	}
 
 	// Warn if debug mode is on in production
@@ -249,18 +275,20 @@ func runServer(args []string) {
 	// Parse allowed origins for CORS
 	allowedOrigins := middleware.ParseAllowedOrigins(cfg.Server.AllowedOrigins)
 
-	// Setup middleware (CORS is handled by corsWrapper at fasthttp level)
+	// Setup middleware (CORS and panic recovery are handled at the fasthttp
+	// level by corsWrapper / middleware.RecoverHandler, see server below)
 	g.Before(middleware.SecurityHeaders())
 	g.Before(middleware.RequestLogger(lo))
-	g.Before(middleware.Recovery(lo))
 	g.Before(middleware.CSRFProtection())
 
 	// Setup routes
 	setupRoutes(g, app, lo, cfg.Server.BasePath, rdb, cfg)
 
-	// Create server with CORS wrapper
+	// Create server with CORS + panic recovery wrappers. fasthttp does not
+	// recover panics itself, so without RecoverHandler a single panicking
+	// request would terminate the whole process.
 	server := &fasthttp.Server{
-		Handler:            corsWrapper(g.Handler(), allowedOrigins),
+		Handler:            middleware.RecoverHandler(corsWrapper(g.Handler(), allowedOrigins), lo),
 		ReadTimeout:        time.Duration(cfg.Server.ReadTimeout) * time.Second,
 		WriteTimeout:       time.Duration(cfg.Server.WriteTimeout) * time.Second,
 		MaxRequestBodySize: 15 * 1024 * 1024,
@@ -285,6 +313,7 @@ func runServer(args []string) {
 	// Start embedded workers
 	var workers []*worker.Worker
 	var workerCancel context.CancelFunc
+	var workerWG sync.WaitGroup
 	if *numWorkers > 0 {
 		var workerCtx context.Context
 		workerCtx, workerCancel = context.WithCancel(context.Background())
@@ -297,7 +326,9 @@ func runServer(args []string) {
 			workers = append(workers, w)
 
 			workerNum := i + 1
+			workerWG.Add(1)
 			go func() {
+				defer workerWG.Done()
 				lo.Info("Worker started", "worker_num", workerNum)
 				if err := w.Run(workerCtx); err != nil && err != context.Canceled {
 					lo.Error("Worker error", "error", err, "worker_num", workerNum)
@@ -316,33 +347,89 @@ func runServer(args []string) {
 
 	lo.Info("Shutting down...")
 
-	// Stop campaign stats subscriber
-	lo.Info("Stopping campaign stats subscriber...")
-	app.StopCampaignStatsSubscriber()
-	lo.Info("Campaign stats subscriber stopped")
+	// 1. Stop accepting requests and drain the in-flight ones. Hijacked
+	//    WebSocket connections are not tracked by fasthttp, so this returns
+	//    once regular HTTP requests have completed (or after the timeout).
+	lo.Info("Stopping server...")
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := server.ShutdownWithContext(shutdownCtx); err != nil {
+		lo.Error("Server shutdown error", "error", err)
+	}
+	shutdownCancel()
+	lo.Info("Server stopped")
 
-	// Stop SLA processor
-	lo.Info("Stopping SLA processor...")
+	// 2. Let background work spawned by requests (inbound webhook processing,
+	//    outbound webhooks, async sends, audit writes) finish before the
+	//    workers and data stores go away.
+	if !app.WaitForBackgroundTasks(30 * time.Second) {
+		lo.Warn("Timed out waiting for background tasks")
+	}
+	if !audit.Flush(10 * time.Second) {
+		lo.Warn("Timed out waiting for audit log writes")
+	}
+
+	// 3. Stop periodic processors and embedded workers, waiting for any
+	//    in-flight campaign job so a half-sent recipient is not redelivered.
+	app.StopCampaignStatsSubscriber()
 	slaCancel()
 	slaProcessor.Stop()
-	lo.Info("SLA processor stopped")
-
-	// Stop workers first
 	if workerCancel != nil {
 		lo.Info("Stopping workers...", "count", len(workers))
 		workerCancel()
+		workersDone := make(chan struct{})
+		go func() {
+			workerWG.Wait()
+			close(workersDone)
+		}()
+		select {
+		case <-workersDone:
+		case <-time.After(60 * time.Second):
+			lo.Warn("Timed out waiting for workers to finish")
+		}
 		for _, w := range workers {
 			_ = w.Close()
 		}
 		lo.Info("Workers stopped")
 	}
+	wsHub.Stop()
 
-	// Then stop server
-	lo.Info("Stopping server...")
-	if err := server.Shutdown(); err != nil {
-		lo.Error("Server shutdown error", "error", err)
+	// 4. Release the data stores last.
+	if err := rdb.Close(); err != nil {
+		lo.Error("Redis close error", "error", err)
 	}
-	lo.Info("Server stopped")
+	if sqlDB, err := db.DB(); err == nil {
+		if err := sqlDB.Close(); err != nil {
+			lo.Error("Database close error", "error", err)
+		}
+	}
+	lo.Info("Shutdown complete")
+}
+
+// ============================================================================
+// HEALTHCHECK COMMAND
+// ============================================================================
+
+// runHealthcheck probes the /health endpoint and exits non-zero on failure.
+// It exists so container images can declare a HEALTHCHECK without shipping
+// curl or wget in the runtime image.
+func runHealthcheck(args []string) {
+	flags := flag.NewFlagSet("healthcheck", flag.ExitOnError)
+	url := flags.String("url", "http://127.0.0.1:8080/health", "Health endpoint URL")
+	timeout := flags.Duration("timeout", 5*time.Second, "Request timeout")
+	_ = flags.Parse(args)
+
+	client := &http.Client{Timeout: *timeout}
+	resp, err := client.Get(*url)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck failed: %v\n", err)
+		os.Exit(1)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "healthcheck failed: status %d\n", resp.StatusCode)
+		os.Exit(1)
+	}
+	fmt.Println("ok")
 }
 
 // ============================================================================
@@ -406,6 +493,7 @@ func runWorker(args []string) {
 	// Create and run workers
 	workers := make([]*worker.Worker, *workerCount)
 	errCh := make(chan error, *workerCount)
+	var wg sync.WaitGroup
 
 	for i := 0; i < *workerCount; i++ {
 		w, err := worker.New(cfg, db, rdb, lo)
@@ -414,7 +502,9 @@ func runWorker(args []string) {
 		}
 		workers[i] = w
 
+		wg.Add(1)
 		go func(workerNum int) {
+			defer wg.Done()
 			lo.Info("Worker started", "worker_num", workerNum)
 			errCh <- w.Run(ctx)
 		}(i + 1)
@@ -434,14 +524,31 @@ func runWorker(args []string) {
 		}
 	}
 
-	// Cleanup
+	// Wait for in-flight jobs to finish so a half-sent recipient is not
+	// redelivered on the next start, then release resources.
 	lo.Info("Shutting down workers...")
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second):
+		lo.Warn("Timed out waiting for workers to finish")
+	}
 	for _, w := range workers {
 		if w != nil {
 			if err := w.Close(); err != nil {
 				lo.Error("Error closing worker", "error", err)
 			}
 		}
+	}
+	if err := rdb.Close(); err != nil {
+		lo.Error("Redis close error", "error", err)
+	}
+	if sqlDB, err := db.DB(); err == nil {
+		_ = sqlDB.Close()
 	}
 	lo.Info("Workers stopped")
 }
@@ -564,19 +671,11 @@ func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger, basePa
 		})
 	}
 
-	// Role-based access control middleware
-	g.Before(func(r *fastglue.Request) *fastglue.Request {
-		method := string(r.RequestCtx.Method())
-
-		// Skip OPTIONS preflight requests
-		if method == "OPTIONS" {
-			return r
-		}
-
-		// Route-level permission checks are now handled at the handler level
-		// using the granular permission system (HasPermission checks)
-		return r
-	})
+	// Route-level permission safety net: mutating and sensitive routes are
+	// mapped to the resource permission they require (see
+	// handlers.RouteRequiredPermission), so a handler that omits its own
+	// requireAuth check is still protected.
+	g.Before(app.RequireRoutePermission)
 
 	// Current User (all authenticated users)
 	g.GET("/api/me", app.GetCurrentUser)
@@ -920,4 +1019,16 @@ func corsWrapper(next fasthttp.RequestHandler, allowedOrigins map[string]bool) f
 
 		next(ctx)
 	}
+}
+
+// exampleJWTSecret is the placeholder shipped in config.example.toml.
+const exampleJWTSecret = "your-super-secret-jwt-key-change-in-production"
+
+// randomHex returns n random bytes hex-encoded.
+func randomHex(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand failed: " + err.Error())
+	}
+	return hex.EncodeToString(b)
 }

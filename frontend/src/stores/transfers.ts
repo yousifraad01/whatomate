@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { chatbotService } from '@/services/api'
+import { useAuthStore } from '@/stores/auth'
 
 export interface AgentTransfer {
   id: string
@@ -92,7 +93,10 @@ export const useTransfersStore = defineStore('transfers', () => {
   )
 
   const myTransfers = computed(() => {
-    const userId = localStorage.getItem('user_id')
+    // The signed-in user lives in the auth store; nothing ever wrote a
+    // 'user_id' localStorage key, so this filter always returned [] before.
+    const userId = useAuthStore().user?.id
+    if (!userId) return []
     return transfers.value.filter(t =>
       t.status === 'active' && t.agent_id === userId
     )

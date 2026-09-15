@@ -31,10 +31,20 @@ func roleAuditSnapshot(role *models.CustomRole) map[string]any {
 
 // RoleRequest represents the request body for creating/updating a role
 type RoleRequest struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	IsDefault   bool     `json:"is_default"`
-	Permissions []string `json:"permissions"` // Format: ["resource:action", ...]
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	IsDefault   bool   `json:"is_default"`
+	// Permissions is a pointer so an explicit empty list clears the role's
+	// permissions while an omitted field leaves them unchanged.
+	Permissions *[]string `json:"permissions"` // Format: ["resource:action", ...]
+}
+
+// permissionKeys returns the requested permission keys (nil when omitted).
+func (req RoleRequest) permissionKeys() []string {
+	if req.Permissions == nil {
+		return nil
+	}
+	return *req.Permissions
 }
 
 // RoleResponse represents the response for a role
@@ -99,9 +109,7 @@ func (a *App) ListRoles(r *fastglue.Request) error {
 	// Convert to response format with user counts
 	response := make([]RoleResponse, len(roles))
 	for i, role := range roles {
-		var userCount int64
-		a.DB.Model(&models.User{}).Where("role_id = ?", role.ID).Count(&userCount)
-		response[i] = roleToResponse(role, userCount)
+		response[i] = roleToResponse(role, a.roleUserCount(orgID, role.ID))
 	}
 
 	return r.SendEnvelope(listEnvelope("roles", response, total, pg))
@@ -130,10 +138,7 @@ func (a *App) GetRole(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to get role", nil, "")
 	}
 
-	var userCount int64
-	a.DB.Model(&models.User{}).Where("role_id = ?", role.ID).Count(&userCount)
-
-	return r.SendEnvelope(roleToResponse(role, userCount))
+	return r.SendEnvelope(roleToResponse(role, a.roleUserCount(orgID, role.ID)))
 }
 
 // CreateRole creates a new custom role
@@ -159,8 +164,12 @@ func (a *App) CreateRole(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusConflict, "Role with this name already exists", nil, "")
 	}
 
+	if !a.canGrantPermissions(userID, orgID, req.permissionKeys()) {
+		return r.SendErrorEnvelope(fasthttp.StatusForbidden, "Cannot grant permissions you do not hold", nil, "")
+	}
+
 	// Get permissions from database
-	permissions, err := a.getPermissionsByKeys(req.Permissions)
+	permissions, err := a.getPermissionsByKeys(req.permissionKeys())
 	if err != nil {
 		a.Log.Error("Failed to fetch permissions", "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to create role", nil, "")
@@ -235,8 +244,9 @@ func (a *App) UpdateRole(r *fastglue.Request) error {
 	}
 
 	if role.IsSystem {
-		// Check if user is super admin
-		isSuperAdmin, _ := r.RequestCtx.UserValue("is_super_admin").(bool)
+		// Check if user is super admin (from the database, not the token claim,
+		// so a revoked flag takes effect immediately)
+		isSuperAdmin := a.IsSuperAdmin(userID)
 
 		// Only allow description updates for non-super admins
 		if req.Description != "" {
@@ -244,8 +254,8 @@ func (a *App) UpdateRole(r *fastglue.Request) error {
 		}
 
 		// Super admins can update permissions for system roles
-		if isSuperAdmin && len(req.Permissions) > 0 {
-			permissions, err := a.getPermissionsByKeys(req.Permissions)
+		if isSuperAdmin && req.Permissions != nil {
+			permissions, err := a.getPermissionsByKeys(req.permissionKeys())
 			if err != nil {
 				a.Log.Error("Failed to fetch permissions", "error", err)
 				return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to update role", nil, "")
@@ -286,9 +296,12 @@ func (a *App) UpdateRole(r *fastglue.Request) error {
 		role.Description = req.Description
 	}
 
-	// Update permissions if provided
-	if len(req.Permissions) > 0 {
-		permissions, err := a.getPermissionsByKeys(req.Permissions)
+	// Update permissions if provided (an empty list clears them)
+	if req.Permissions != nil {
+		if !a.canGrantPermissions(userID, orgID, req.permissionKeys()) {
+			return r.SendErrorEnvelope(fasthttp.StatusForbidden, "Cannot grant permissions you do not hold", nil, "")
+		}
+		permissions, err := a.getPermissionsByKeys(req.permissionKeys())
 		if err != nil {
 			a.Log.Error("Failed to fetch permissions", "error", err)
 			return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to update role", nil, "")
@@ -356,10 +369,8 @@ func (a *App) DeleteRole(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Cannot delete system roles", nil, "")
 	}
 
-	// Check if any users have this role
-	var userCount int64
-	a.DB.Model(&models.User{}).Where("role_id = ?", id).Count(&userCount)
-	if userCount > 0 {
+	// Check if any users have this role (native role column or org membership)
+	if a.roleUserCount(orgID, id) > 0 {
 		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Cannot delete role with assigned users", nil, "")
 	}
 
@@ -507,4 +518,29 @@ func splitPermissionKey(key string) []string {
 		}
 	}
 	return nil
+}
+
+// canGrantPermissions reports whether the user may put the given permission
+// keys on a role: super admins may grant anything, everyone else only what
+// they hold themselves in the organization. Without this check a role editor
+// could create a role with more rights than their own and assign it to
+// themselves or an accomplice.
+func (a *App) canGrantPermissions(userID, orgID uuid.UUID, keys []string) bool {
+	perms, err := a.getUserPermissionsCached(userID, orgID)
+	if err != nil {
+		return false
+	}
+	if perms.IsSuperAdmin {
+		return true
+	}
+	held := make(map[string]struct{}, len(perms.Permissions))
+	for _, p := range perms.Permissions {
+		held[p] = struct{}{}
+	}
+	for _, k := range keys {
+		if _, ok := held[k]; !ok {
+			return false
+		}
+	}
+	return true
 }

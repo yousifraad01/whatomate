@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # Frontend build stage — pinned to BUILDPLATFORM (output is arch-agnostic JS).
 FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend-builder
 
@@ -5,7 +6,7 @@ WORKDIR /app/frontend
 
 # Copy frontend dependency files first for caching
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
+RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
 
 # Copy frontend source and build
 COPY frontend/ .
@@ -17,6 +18,10 @@ FROM --platform=$BUILDPLATFORM golang:1.25.3-alpine AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
+# Stamped into `whatomate version`; the release workflow passes the tag,
+# local builds default to "dev".
+ARG VERSION=dev
+ARG BUILD_TIME=unknown
 
 WORKDIR /app
 
@@ -25,16 +30,22 @@ RUN apk add --no-cache git ca-certificates
 
 # Copy go mod files
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
-# Copy source code
+# Copy source code (see .dockerignore for what stays out of the context)
 COPY . .
 
 # Embed frontend build into Go binary
 COPY --from=frontend-builder /app/frontend/dist/ ./internal/frontend/dist/
 
-# Build the binary
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -installsuffix cgo -o whatomate ./cmd/whatomate
+# Build the binary. The module and build caches are BuildKit cache mounts so
+# unchanged packages are not recompiled on every image build.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath \
+      -ldflags="-s -w -X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME}" \
+      -o whatomate ./cmd/whatomate
 
 # Piper TTS download stage — runs on BUILDPLATFORM (just wget+tar, no native exec),
 # selects the tarball matching TARGETARCH so the final image gets a binary that runs.
@@ -87,6 +98,12 @@ RUN mkdir -p /app/uploads /app/audio
 
 # Expose port
 EXPOSE 8080
+
+# Container-level liveness probe using the binary itself (the runtime image
+# ships no curl/wget). Override the URL if the server port is changed:
+#   HEALTHCHECK CMD ["./whatomate", "healthcheck", "-url", "http://127.0.0.1:9090/health"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["./whatomate", "healthcheck"]
 
 # Match the GoReleaser image's launch convention so the same orchestrator
 # args work against both tags: the binary is the ENTRYPOINT and CMD holds

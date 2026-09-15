@@ -988,7 +988,7 @@ func (a *App) UpdateChatbotFlow(r *fastglue.Request) error {
 	var req struct {
 		Name              *string        `json:"name"`
 		Description       *string        `json:"description"`
-		TriggerKeywords   []string       `json:"trigger_keywords"`
+		TriggerKeywords   *[]string      `json:"trigger_keywords"` // pointer: [] clears, omitted keeps
 		InitialMessage    *string        `json:"initial_message"`
 		CompletionMessage *string        `json:"completion_message"`
 		OnCompleteAction  *string        `json:"on_complete_action"`
@@ -1008,8 +1008,8 @@ func (a *App) UpdateChatbotFlow(r *fastglue.Request) error {
 	if req.Description != nil {
 		flow.Description = *req.Description
 	}
-	if len(req.TriggerKeywords) > 0 {
-		flow.TriggerKeywords = req.TriggerKeywords
+	if req.TriggerKeywords != nil {
+		flow.TriggerKeywords = *req.TriggerKeywords
 	}
 	if req.InitialMessage != nil {
 		flow.InitialMessage = *req.InitialMessage
@@ -1106,10 +1106,11 @@ func (a *App) DeleteChatbotFlow(r *fastglue.Request) error {
 
 // ListAIContexts lists all AI contexts
 func (a *App) ListAIContexts(r *fastglue.Request) error {
-	orgID, err := a.getOrgID(r)
+	orgID, userID, err := a.getOrgAndUserID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
+	canEdit := a.HasPermission(userID, models.ResourceChatbotAI, models.ActionWrite, orgID)
 
 	pg := parsePagination(r)
 	search := string(r.RequestCtx.QueryArgs().Peek("search"))
@@ -1140,7 +1141,7 @@ func (a *App) ListAIContexts(r *fastglue.Request) error {
 			ContextType:     ctx.ContextType,
 			TriggerKeywords: ctx.TriggerKeywords,
 			StaticContent:   ctx.StaticContent,
-			ApiConfig:       ctx.ApiConfig,
+			ApiConfig:       maskConfigHeaders(ctx.ApiConfig, canEdit),
 			Enabled:         ctx.IsEnabled,
 			Priority:        ctx.Priority,
 			CreatedAt:       ctx.CreatedAt.Format(time.RFC3339),
@@ -1218,10 +1219,11 @@ func (a *App) CreateAIContext(r *fastglue.Request) error {
 
 // GetAIContext gets a single AI context
 func (a *App) GetAIContext(r *fastglue.Request) error {
-	orgID, err := a.getOrgID(r)
+	orgID, userID, err := a.getOrgAndUserID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
+	canEdit := a.HasPermission(userID, models.ResourceChatbotAI, models.ActionWrite, orgID)
 
 	id, err := parsePathUUID(r, "id", "context")
 	if err != nil {
@@ -1241,7 +1243,7 @@ func (a *App) GetAIContext(r *fastglue.Request) error {
 		ContextType:     aiCtx.ContextType,
 		TriggerKeywords: aiCtx.TriggerKeywords,
 		StaticContent:   aiCtx.StaticContent,
-		ApiConfig:       aiCtx.ApiConfig,
+		ApiConfig:       maskConfigHeaders(aiCtx.ApiConfig, canEdit),
 		Enabled:         aiCtx.IsEnabled,
 		Priority:        aiCtx.Priority,
 		CreatedAt:       aiCtx.CreatedAt.Format(time.RFC3339),
@@ -1280,7 +1282,7 @@ func (a *App) UpdateAIContext(r *fastglue.Request) error {
 	var req struct {
 		Name            *string             `json:"name"`
 		ContextType     *models.ContextType `json:"context_type"`
-		TriggerKeywords []string            `json:"trigger_keywords"`
+		TriggerKeywords *[]string           `json:"trigger_keywords"` // pointer: [] clears, omitted keeps
 		StaticContent   *string             `json:"static_content"`
 		ApiConfig       *models.JSONB       `json:"api_config"`
 		Priority        *int                `json:"priority"`
@@ -1297,8 +1299,8 @@ func (a *App) UpdateAIContext(r *fastglue.Request) error {
 	if req.ContextType != nil {
 		aiCtx.ContextType = *req.ContextType
 	}
-	if len(req.TriggerKeywords) > 0 {
-		aiCtx.TriggerKeywords = req.TriggerKeywords
+	if req.TriggerKeywords != nil {
+		aiCtx.TriggerKeywords = *req.TriggerKeywords
 	}
 	if req.StaticContent != nil {
 		aiCtx.StaticContent = *req.StaticContent
@@ -1364,14 +1366,17 @@ func (a *App) DeleteAIContext(r *fastglue.Request) error {
 
 // ListChatbotSessions lists chatbot sessions
 func (a *App) ListChatbotSessions(r *fastglue.Request) error {
-	orgID, err := a.getOrgID(r)
+	orgID, userID, err := a.requireAuth(r, models.ResourceChat, models.ActionRead)
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
+		return nil
 	}
 
 	status := string(r.RequestCtx.QueryArgs().Peek("status"))
 
+	// Sessions hold the answers a contact gave the bot; agents without
+	// contacts:read only see sessions of contacts assigned to them.
 	query := a.DB.Where("organization_id = ?", orgID).
+		Where("contact_id IN (?)", a.scopeAssignedContact(a.DB.Model(&models.Contact{}).Select("id").Where("organization_id = ?", orgID), userID, orgID)).
 		Preload("Contact").
 		Order("last_activity_at DESC")
 
@@ -1392,9 +1397,9 @@ func (a *App) ListChatbotSessions(r *fastglue.Request) error {
 
 // GetChatbotSession gets a single chatbot session with messages
 func (a *App) GetChatbotSession(r *fastglue.Request) error {
-	orgID, err := a.getOrgID(r)
+	orgID, userID, err := a.requireAuth(r, models.ResourceChat, models.ActionRead)
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
+		return nil
 	}
 
 	id, err := parsePathUUID(r, "id", "session")
@@ -1404,6 +1409,7 @@ func (a *App) GetChatbotSession(r *fastglue.Request) error {
 
 	var session models.ChatbotSession
 	if err := a.DB.Where("id = ? AND organization_id = ?", id, orgID).
+		Where("contact_id IN (?)", a.scopeAssignedContact(a.DB.Model(&models.Contact{}).Select("id").Where("organization_id = ?", orgID), userID, orgID)).
 		Preload("Contact").
 		Preload("Messages").
 		First(&session).Error; err != nil {

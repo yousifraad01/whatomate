@@ -3,6 +3,7 @@ package handlers_test
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/shridarpatil/whatomate/internal/handlers"
@@ -78,7 +79,7 @@ func TestApp_SendTemplateMessage(t *testing.T) {
 		assert.Equal(t, "Hello Alice! Your order ORD-42 has been confirmed.", contentMap["body"])
 
 		// Wait for async send to complete before checking mock
-		app.WaitForBackgroundTasks()
+		app.WaitForBackgroundTasks(10 * time.Second)
 
 		// Verify message was sent to WhatsApp API
 		require.Len(t, mockServer.sentMessages, 1)
@@ -647,7 +648,7 @@ func TestApp_SendTemplateMessage(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, fasthttp.StatusOK, testutil.GetResponseStatusCode(req))
 
-		app.WaitForBackgroundTasks()
+		app.WaitForBackgroundTasks(10 * time.Second)
 
 		require.Len(t, mockServer.sentMessages, 1)
 		tplPayload := mockServer.sentMessages[0]["template"].(map[string]any)
@@ -701,7 +702,7 @@ func TestApp_SendTemplateMessage(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, fasthttp.StatusOK, testutil.GetResponseStatusCode(req))
 
-		app.WaitForBackgroundTasks()
+		app.WaitForBackgroundTasks(10 * time.Second)
 
 		require.Len(t, mockServer.sentMessages, 1)
 		tplPayload := mockServer.sentMessages[0]["template"].(map[string]any)

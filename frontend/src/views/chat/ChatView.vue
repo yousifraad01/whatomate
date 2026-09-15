@@ -64,8 +64,8 @@ import {
   MoreVertical,
   Phone,
   PhoneCall,
+  ArrowLeft,
   Check,
-  CheckCheck,
   Clock,
   AlertCircle,
   User,
@@ -90,8 +90,9 @@ import {
   Filter,
   StickyNote
 } from 'lucide-vue-next'
-import { getInitials, getAvatarGradient } from '@/lib/utils'
+import { getInitials, getAvatarGradient, currentLocale } from '@/lib/utils'
 import { useColorMode } from '@/composables/useColorMode'
+import MessageStatusIcon from '@/components/chat/MessageStatusIcon.vue'
 import { useInfiniteScroll } from '@/composables/useInfiniteScroll'
 import CannedResponsePicker from '@/components/chat/CannedResponsePicker.vue'
 import PreviewButtonGroup from '@/components/chatbot/flow-preview/PreviewButtonGroup.vue'
@@ -255,11 +256,6 @@ const messagesScroll = useInfiniteScroll({
     await messagesScroll.preserveScrollPosition(async () => {
       await contactsStore.fetchOlderMessages(contactsStore.currentContact!.id, selectedAccount.value || undefined)
       await nextTick()
-      // Load media for any new messages
-      try {
-      } catch (e) {
-        console.error('Error loading media:', e)
-      }
     })
   },
   hasMore: computed(() => contactsStore.hasMoreMessages),
@@ -616,11 +612,6 @@ async function selectContact(id: string) {
     wsService.setCurrentContact(id)
     // Wait for DOM to render messages before scrolling
     await nextTick()
-    // Load media for messages after messages are fetched
-    try {
-    } catch (e) {
-      console.error('Error loading media:', e)
-    }
     // Scroll after a brief delay to ensure content is rendered (instant on initial load)
     setTimeout(() => {
       scrollToBottom(true)
@@ -675,24 +666,12 @@ watch(() => contactsStore.messages.length, (newLen, oldLen) => {
   }
 })
 
-// Watch for messages changes to load media
-watch(() => contactsStore.messages, () => {
-  try {
-  } catch (e) {
-    console.error('Error loading media:', e)
-  }
-}, { deep: true })
-
 async function switchAccount(accountName: string) {
   if (!contactsStore.currentContact || accountName === selectedAccount.value) return
   selectedAccount.value = accountName
   contactsStore.setAccountFilter(accountName)
   await contactsStore.fetchMessages(contactsStore.currentContact.id, { account: accountName })
   await nextTick()
-  try {
-  } catch (e) {
-    console.error('Error loading media:', e)
-  }
   scrollToBottom(true)
 }
 
@@ -1287,35 +1266,9 @@ function scrollToBottom(instant = false) {
 }
 
 
-function getMessageStatusIcon(status: string) {
-  switch (status) {
-    case 'sent':
-      return Check
-    case 'delivered':
-      return CheckCheck
-    case 'read':
-      return CheckCheck
-    case 'failed':
-      return AlertCircle
-    default:
-      return Clock
-  }
-}
-
-function getMessageStatusClass(status: string) {
-  switch (status) {
-    case 'read':
-      return 'text-blue-400' // Bright blue for read
-    case 'failed':
-      return 'text-destructive'
-    default:
-      return 'text-muted-foreground' // Gray for sent/delivered
-  }
-}
-
 function formatMessageTime(dateStr: string) {
   const date = new Date(dateStr)
-  return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+  return date.toLocaleTimeString(currentLocale(), { hour: '2-digit', minute: '2-digit' })
 }
 
 function formatContactTime(dateStr?: string) {
@@ -1693,18 +1646,28 @@ async function sendMediaMessage() {
 </script>
 
 <template>
-  <div class="flex h-full bg-[#0a0a0b] light:bg-gray-50">
-    <!-- Contacts List -->
-    <div class="w-80 border-r border-white/[0.08] light:border-gray-200 flex flex-col bg-[#0a0a0b] light:bg-white">
+  <div class="flex h-full bg-background">
+    <!-- Contacts List. On narrow screens the list and the conversation take
+         turns: the list shows until a conversation is opened, and the
+         conversation header offers a way back. -->
+    <aside
+      :class="[
+        'w-full shrink-0 flex-col border-r border-border bg-background md:flex md:w-80',
+        contactsStore.currentContact ? 'hidden' : 'flex'
+      ]"
+      :aria-label="$t('chat.conversationList')"
+    >
       <!-- Search Header -->
-      <div class="p-2 border-b border-white/[0.08] light:border-gray-200">
+      <div class="border-b border-border p-2">
         <div class="flex items-center gap-2">
-          <div class="relative flex-1">
-            <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-white/40 light:text-gray-400" />
+          <div class="relative flex-1" role="search">
+            <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
             <Input
               v-model="contactsStore.searchQuery"
-              :placeholder="$t('chat.searchContacts') + '...'"
-              class="pl-8 h-8 text-sm bg-white/[0.04] border-white/[0.1] text-white placeholder:text-white/40 light:bg-gray-50 light:border-gray-200 light:text-gray-900 light:placeholder:text-gray-400"
+              type="search"
+              :placeholder="$t('chat.searchContacts') + '…'"
+              :aria-label="$t('chat.searchContacts')"
+              class="h-8 pl-8 text-sm"
             />
           </div>
           <!-- Add Contact -->
@@ -1748,7 +1711,7 @@ async function sendMediaMessage() {
                     class="h-6 px-2 text-xs"
                     @click="clearTagFilter"
                   >
-                    Clear
+                    {{ $t('common.clear') }}
                   </Button>
                 </div>
                 <Separator />
@@ -1759,8 +1722,8 @@ async function sendMediaMessage() {
                   <button
                     v-for="tag in tagsStore.tags"
                     :key="tag.name"
-                    class="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-sm hover:bg-white/[0.08] light:hover:bg-gray-100 transition-colors"
-                    :class="contactsStore.selectedTags.includes(tag.name) && 'bg-white/[0.08] light:bg-gray-100'"
+                    class="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-sm hover:bg-accent transition-colors"
+                    :class="contactsStore.selectedTags.includes(tag.name) && 'bg-accent'"
                     @click="toggleTagFilter(tag.name)"
                   >
                     <span :class="['w-2 h-2 rounded-full shrink-0', getTagColorClass(tag.color).split(' ')[0]]" />
@@ -1793,97 +1756,116 @@ async function sendMediaMessage() {
       <!-- Contacts -->
       <ScrollArea :ref="(el: any) => contactsScroll.scrollAreaRef.value = el" orientation="vertical" class="flex-1">
         <div class="py-1 w-full">
-          <div
+          <button
             v-for="contact in contactsStore.sortedContacts"
             :key="contact.id"
+            type="button"
             :class="[
-              'flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-white/[0.04] light:hover:bg-gray-50 transition-colors',
-              contactsStore.currentContact?.id === contact.id && 'bg-white/[0.08] light:bg-gray-100'
+              'flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-accent focus-visible:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
+              contactsStore.currentContact?.id === contact.id && 'bg-accent'
             ]"
+            :aria-current="contactsStore.currentContact?.id === contact.id ? 'true' : undefined"
+            :aria-label="$t('chat.openConversationWith', { name: contact.name || contact.phone_number })"
             @click="handleContactClick(contact)"
           >
-            <Avatar class="h-9 w-9 ring-2 ring-white/[0.1] light:ring-gray-200">
+            <Avatar class="h-9 w-9">
               <AvatarImage :src="contact.avatar_url" />
               <AvatarFallback :class="'text-xs bg-gradient-to-br text-white ' + getAvatarGradient(contact.name || contact.phone_number)">
                 {{ getInitials(contact.name || contact.phone_number) }}
               </AvatarFallback>
             </Avatar>
-            <div class="flex-1 min-w-0">
+            <div class="min-w-0 flex-1">
               <div class="flex items-center justify-between gap-2">
                 <p
-                  class="flex-1 min-w-0 text-sm font-medium truncate text-white light:text-gray-900"
+                  :class="['min-w-0 flex-1 truncate text-sm text-foreground', contact.unread_count > 0 ? 'font-semibold' : 'font-medium']"
                   :title="contact.name || contact.phone_number"
                 >
                   {{ contact.name || contact.phone_number }}
                 </p>
-                <span class="flex-shrink-0 text-[11px] text-white/40 light:text-gray-500">
+                <span class="flex-shrink-0 text-[11px] text-muted-foreground">
                   {{ formatContactTime(contact.last_message_at) }}
                 </span>
               </div>
               <div class="flex items-center justify-between gap-2">
-                <p class="flex-1 min-w-0 text-xs text-white/50 light:text-gray-500 truncate">
+                <p class="min-w-0 flex-1 truncate text-xs text-muted-foreground">
                   {{ contact.phone_number }}
                 </p>
-                <Badge v-if="contact.unread_count > 0" class="flex-shrink-0 h-5 text-[10px] bg-emerald-500/20 text-emerald-400 light:bg-emerald-100 light:text-emerald-700">
-                  {{ contact.unread_count }}
+                <Badge v-if="contact.unread_count > 0" variant="success" class="h-5 flex-shrink-0 px-1.5 text-[11px] font-semibold">
+                  <span aria-hidden="true">{{ contact.unread_count }}</span>
+                  <span class="sr-only">{{ $t('chat.unreadCount', { count: contact.unread_count }) }}</span>
                 </Badge>
               </div>
             </div>
-          </div>
+          </button>
 
           <!-- Loading indicator for infinite scroll -->
           <div v-if="contactsStore.isLoadingMoreContacts" class="p-3 text-center">
-            <Loader2 class="h-5 w-5 mx-auto animate-spin text-white/40 light:text-gray-400" />
+            <Loader2 class="h-5 w-5 mx-auto animate-spin text-muted-foreground" />
           </div>
 
-          <div v-if="contactsStore.sortedContacts.length === 0" class="p-3 text-center text-white/40 light:text-gray-500">
-            <User class="h-6 w-6 mx-auto mb-1.5 opacity-50" />
+          <div v-if="contactsStore.sortedContacts.length === 0" class="p-3 text-center text-muted-foreground" role="status">
+            <User class="mx-auto mb-1.5 h-6 w-6 opacity-60" aria-hidden="true" />
             <p class="text-sm">{{ $t('chat.noContacts') }}</p>
           </div>
         </div>
       </ScrollArea>
-    </div>
+    </aside>
 
     <!-- Chat Area -->
-    <div class="flex-1 flex flex-col bg-[#0f0f10] light:bg-gray-50">
+    <section
+      :class="[
+        'min-w-0 flex-1 flex-col bg-background md:flex',
+        contactsStore.currentContact ? 'flex' : 'hidden'
+      ]"
+      :aria-label="$t('chat.messages')"
+    >
       <!-- No Contact Selected -->
       <div
         v-if="!contactsStore.currentContact"
-        class="flex-1 flex items-center justify-center text-white/40 light:text-gray-500"
+        class="flex flex-1 items-center justify-center text-muted-foreground"
       >
         <div class="text-center">
-          <div class="h-16 w-16 rounded-2xl bg-gradient-to-br from-emerald-500 to-green-600 flex items-center justify-center mx-auto mb-4 shadow-lg shadow-emerald-500/20">
-            <Send class="h-8 w-8 text-white" />
+          <div class="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-muted text-muted-foreground" aria-hidden="true">
+            <Send class="h-6 w-6" />
           </div>
-          <h3 class="font-medium text-lg mb-1 text-white light:text-gray-900">{{ $t('chat.selectConversation') }}</h3>
-          <p class="text-sm text-white/50 light:text-gray-500">{{ $t('chat.chooseContact') }}</p>
+          <h3 class="mb-1 text-base font-semibold text-foreground">{{ $t('chat.selectConversation') }}</h3>
+          <p class="text-sm text-muted-foreground">{{ $t('chat.chooseContact') }}</p>
         </div>
       </div>
 
       <!-- Chat Interface -->
       <template v-else>
         <!-- Chat Header -->
-        <div class="h-14 flex-shrink-0 px-4 border-b border-white/[0.08] light:border-gray-200 flex items-center justify-between bg-[#0f0f10] light:bg-white">
-          <div class="flex items-center gap-2">
-            <Avatar class="h-8 w-8 ring-2 ring-white/[0.1] light:ring-gray-200">
+        <header class="flex h-14 flex-shrink-0 items-center justify-between gap-2 border-b border-border bg-background px-2 sm:px-4">
+          <div class="flex min-w-0 items-center gap-2">
+            <Button
+              variant="ghost"
+              size="icon"
+              class="h-8 w-8 shrink-0 md:hidden"
+              :aria-label="$t('chat.backToConversations')"
+              @click="router.push('/chat')"
+            >
+              <ArrowLeft class="h-4 w-4" aria-hidden="true" />
+            </Button>
+            <Avatar class="h-8 w-8">
               <AvatarImage :src="contactsStore.currentContact.avatar_url" />
               <AvatarFallback :class="'text-xs bg-gradient-to-br text-white ' + getAvatarGradient(contactsStore.currentContact.name || contactsStore.currentContact.phone_number)">
                 {{ getInitials(contactsStore.currentContact.name || contactsStore.currentContact.phone_number) }}
               </AvatarFallback>
             </Avatar>
-            <div>
-              <div class="flex items-center gap-1.5">
-                <p class="text-sm font-medium text-white light:text-gray-900">
+            <div class="min-w-0">
+              <div class="flex min-w-0 items-center gap-1.5">
+                <h1 class="truncate text-sm font-medium text-foreground">
                   {{ contactsStore.currentContact.name || contactsStore.currentContact.phone_number }}
-                </p>
-                <Badge v-if="activeTransferId" class="text-[10px] h-5 bg-orange-500/20 text-orange-400 light:bg-orange-100 light:text-orange-700">
-                  Paused
+                </h1>
+                <Badge v-if="activeTransferId" variant="warning" class="h-5 px-1.5 text-[10px]">
+                  {{ $t('chat.paused') }}
                 </Badge>
-                <Badge v-if="contactsStore.currentContact?.marketing_opt_out" class="text-[10px] h-5 bg-red-500/20 text-red-400 light:bg-red-100 light:text-red-700" :title="$t('chat.marketingOptOut')">
-                  {{ $t('chat.marketingOptOut', 'Marketing Opt-out') }}
+                <Badge v-if="contactsStore.currentContact?.marketing_opt_out" variant="destructive" class="hidden h-5 px-1.5 text-[10px] sm:inline-flex" :title="$t('chat.marketingOptOut')">
+                  {{ $t('chat.marketingOptOut') }}
                 </Badge>
               </div>
-              <p class="text-[11px] text-white/50 light:text-gray-500">
+              <p class="truncate text-[11px] text-muted-foreground">
                 {{ contactsStore.currentContact.phone_number }}
               </p>
             </div>
@@ -1993,14 +1975,14 @@ async function sendMediaMessage() {
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
-        </div>
+        </header>
 
         <!-- Account Tabs (shown when contact has messages from multiple WhatsApp accounts) -->
         <div
           v-if="orgAccounts.length > 1 && selectedAccount"
-          class="flex-shrink-0 px-4 py-2 border-b border-white/[0.08] light:border-gray-200 bg-[#0a0a0b] light:bg-gray-50"
+          class="flex-shrink-0 px-4 py-2 border-b border-border bg-background"
         >
-          <div class="inline-flex items-center gap-1 rounded-lg bg-white/[0.06] light:bg-gray-100 p-1">
+          <div class="inline-flex items-center gap-1 rounded-lg bg-muted p-1">
             <button
               v-for="acct in orgAccounts"
               :key="acct.name"
@@ -2026,17 +2008,17 @@ async function sendMediaMessage() {
           <Transition name="sticky-date">
             <div
               v-if="showStickyDate"
-              class="absolute top-2 left-1/2 -translate-x-1/2 z-10 px-3 py-1 bg-white/[0.08] light:bg-gray-200 backdrop-blur-sm rounded-full text-[11px] text-white/50 light:text-gray-600 font-medium shadow-sm"
+              class="absolute top-2 left-1/2 -translate-x-1/2 z-10 px-3 py-1 bg-muted backdrop-blur-sm rounded-full text-[11px] text-muted-foreground font-medium shadow-sm"
             >
               {{ stickyDate }}
             </div>
           </Transition>
 
           <ScrollArea :ref="(el: any) => messagesScroll.scrollAreaRef.value = el" class="h-full p-3 chat-background">
-            <div class="space-y-2">
+            <div class="space-y-2" role="log" aria-live="polite" aria-relevant="additions" :aria-label="$t('chat.messageList')">
               <!-- Loading indicator for older messages -->
               <div v-if="contactsStore.isLoadingOlderMessages" class="flex justify-center py-2">
-                <div class="flex items-center gap-2 text-white/40 light:text-gray-500 text-sm">
+                <div class="flex items-center gap-2 text-muted-foreground text-sm">
                   <div class="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
                   <span>{{ $t('chat.loadingOlderMessages') }}...</span>
                 </div>
@@ -2051,7 +2033,7 @@ async function sendMediaMessage() {
                   class="flex items-center justify-center my-4"
                   :data-date-separator="getDateLabel(message.created_at)"
                 >
-                  <div class="px-3 py-1 bg-white/[0.06] light:bg-gray-200 rounded-full text-[11px] text-white/40 light:text-gray-600 font-medium">
+                  <div class="px-3 py-1 bg-muted rounded-full text-[11px] text-muted-foreground font-medium">
                     {{ getDateLabel(message.created_at) }}
                   </div>
                 </div>
@@ -2062,7 +2044,7 @@ async function sendMediaMessage() {
                   v-if="newMessagesCount > 0 && message.id === firstUnreadId"
                   class="flex items-center justify-center my-4"
                 >
-                  <div class="px-3 py-1 bg-white/[0.06] light:bg-gray-200 rounded-full text-[11px] text-white/40 light:text-gray-600 font-medium">
+                  <div class="px-3 py-1 bg-muted rounded-full text-[11px] text-muted-foreground font-medium">
                     {{ newMessagesCount }} {{ newMessagesCount === 1 ? $t('chat.unreadMessage', 'unread message') : $t('chat.unreadMessages', 'unread messages') }}
                   </div>
                 </div>
@@ -2250,9 +2232,9 @@ async function sendMediaMessage() {
                   <span class="chat-bubble-time"><span>{{ formatMessageTime(message.created_at) }}</span></span>
                 </div>
                 <!-- Text content (for text messages or captions) -->
-                <span v-else-if="getMessageContent(message)" class="whitespace-pre-wrap break-words">{{ getMessageContent(message) }}<span class="chat-bubble-time"><span>{{ formatMessageTime(message.created_at) }}</span><component v-if="message.direction === 'outgoing'" :is="getMessageStatusIcon(message.status)" :class="['h-4 w-4 status-icon', getMessageStatusClass(message.status)]" /></span></span>
+                <span v-else-if="getMessageContent(message)" class="whitespace-pre-wrap break-words">{{ getMessageContent(message) }}<span class="chat-bubble-time"><span>{{ formatMessageTime(message.created_at) }}</span><MessageStatusIcon v-if="message.direction === 'outgoing'" :status="message.status" /></span></span>
                 <!-- Fallback for media without URL -->
-                <span v-else-if="isMediaMessage(message) && !message.media_url" class="text-muted-foreground italic">[{{ message.message_type.charAt(0).toUpperCase() + message.message_type.slice(1) }}]<span class="chat-bubble-time"><span>{{ formatMessageTime(message.created_at) }}</span><component v-if="message.direction === 'outgoing'" :is="getMessageStatusIcon(message.status)" :class="['h-4 w-4 status-icon', getMessageStatusClass(message.status)]" /></span></span>
+                <span v-else-if="isMediaMessage(message) && !message.media_url" class="text-muted-foreground italic">[{{ message.message_type.charAt(0).toUpperCase() + message.message_type.slice(1) }}]<span class="chat-bubble-time"><span>{{ formatMessageTime(message.created_at) }}</span><MessageStatusIcon v-if="message.direction === 'outgoing'" :status="message.status" /></span></span>
                 <!-- Interactive buttons - WhatsApp style -->
                 <div
                   v-if="getInteractiveButtons(message).length > 0"
@@ -2312,11 +2294,7 @@ async function sendMediaMessage() {
                 <!-- Time for messages without text content -->
                 <span v-if="!getMessageContent(message) && !(isMediaMessage(message) && !message.media_url)" class="chat-bubble-time block clear-both">
                   <span>{{ formatMessageTime(message.created_at) }}</span>
-                  <component
-                    v-if="message.direction === 'outgoing'"
-                    :is="getMessageStatusIcon(message.status)"
-                    :class="['h-4 w-4 status-icon', getMessageStatusClass(message.status)]"
-                  />
+                  <MessageStatusIcon v-if="message.direction === 'outgoing'" :status="message.status" />
                 </span>
                 <!-- Reactions display -->
                 <div
@@ -2414,11 +2392,12 @@ async function sendMediaMessage() {
                   size="icon"
                   class="h-6 w-6 text-destructive hover:text-destructive"
                   :disabled="retryingMessageId === message.id"
+                  :title="$t('chat.retry')"
+                  :aria-label="$t('chat.retry')"
                   @click="retryMessage(message)"
-                  title="Retry sending"
                 >
-                  <Loader2 v-if="retryingMessageId === message.id" class="h-3 w-3 animate-spin" />
-                  <RotateCw v-else class="h-3 w-3" />
+                  <Loader2 v-if="retryingMessageId === message.id" class="h-3 w-3 animate-spin" aria-hidden="true" />
+                  <RotateCw v-else class="h-3 w-3" aria-hidden="true" />
                 </Button>
               </div>
             </div>
@@ -2443,31 +2422,36 @@ async function sendMediaMessage() {
         <!-- Reply indicator -->
         <div
           v-if="contactsStore.replyingTo"
-          class="px-4 py-2 border-t border-white/[0.08] light:border-gray-200 bg-white/[0.04] light:bg-gray-50 flex items-center justify-between"
+          class="px-4 py-2 border-t border-border bg-muted/50 flex items-center justify-between"
         >
           <div class="flex-1 min-w-0">
-            <p class="text-xs font-medium text-white/50 light:text-gray-500">
-              Replying to {{ contactsStore.replyingTo.direction === 'incoming' ? (contactsStore.currentContact?.profile_name || contactsStore.currentContact?.name || 'Customer') : 'Yourself' }}
+            <p class="text-xs font-medium text-muted-foreground">
+              {{ $t('chat.replyingTo') }} {{ contactsStore.replyingTo.direction === 'incoming' ? (contactsStore.currentContact?.profile_name || contactsStore.currentContact?.name || $t('chat.customer')) : $t('chat.yourself') }}
             </p>
-            <p class="text-sm truncate text-white/70 light:text-gray-700">
-              {{ getMessageContent(contactsStore.replyingTo) || '[Media]' }}
+            <p class="truncate text-sm text-foreground">
+              {{ getMessageContent(contactsStore.replyingTo) || `[${$t('chat.media')}]` }}
             </p>
           </div>
-          <button class="w-6 h-6 rounded hover:bg-white/[0.08] light:hover:bg-gray-200 flex items-center justify-center shrink-0 transition-colors" @click="contactsStore.clearReplyingTo">
-            <X class="h-4 w-4 text-white/50 light:text-gray-500" />
+          <button
+            type="button"
+            class="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            :aria-label="$t('chat.cancelReply')"
+            @click="contactsStore.clearReplyingTo"
+          >
+            <X class="h-4 w-4" aria-hidden="true" />
           </button>
         </div>
 
         <!-- Message Input -->
-        <div class="p-4 border-t border-white/[0.08] light:border-gray-200 bg-[#0f0f10] light:bg-white">
-          <form @submit.prevent="sendMessage" class="flex items-center gap-2 p-2 rounded-xl bg-white/[0.06] light:bg-gray-100 border border-white/[0.08] light:border-gray-200">
+        <div class="border-t border-border bg-background p-2 sm:p-4">
+          <form @submit.prevent="sendMessage" class="flex items-end gap-1 rounded-lg border border-input bg-card p-1.5 focus-within:border-primary focus-within:ring-2 focus-within:ring-ring/30 sm:gap-2 sm:p-2">
             <Tooltip>
               <TooltipTrigger as-child>
                 <span>
                   <Popover v-model:open="emojiPickerOpen">
                     <PopoverTrigger as-child>
-                      <button type="button" class="w-9 h-9 rounded-lg hover:bg-white/[0.08] light:hover:bg-gray-200 flex items-center justify-center transition-colors">
-                        <Smile class="w-[18px] h-[18px] text-white/40 light:text-gray-500" />
+                      <button type="button" class="flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" :aria-label="$t('chat.emoji')">
+                        <Smile class="h-[18px] w-[18px]" aria-hidden="true" />
                       </button>
                     </PopoverTrigger>
                     <PopoverContent side="top" align="start" class="w-auto p-0">
@@ -2509,8 +2493,8 @@ async function sendMediaMessage() {
             </Tooltip>
             <Tooltip>
               <TooltipTrigger as-child>
-                <button type="button" class="w-9 h-9 rounded-lg hover:bg-white/[0.08] light:hover:bg-gray-200 flex items-center justify-center transition-colors" @click="openFilePicker">
-                  <Paperclip class="w-[18px] h-[18px] text-white/40 light:text-gray-500" />
+                <button type="button" class="flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" :aria-label="$t('chat.attachFile')" @click="openFilePicker">
+                  <Paperclip class="h-[18px] w-[18px]" aria-hidden="true" />
                 </button>
               </TooltipTrigger>
               <TooltipContent>{{ $t('chat.attachFile') }}</TooltipContent>
@@ -2525,19 +2509,26 @@ async function sendMediaMessage() {
             <textarea
               ref="messageInputRef"
               v-model="messageInput"
-              :placeholder="$t('chat.typeMessage') + '...'"
+              :placeholder="$t('chat.typeMessage') + '…'"
+              :aria-label="$t('chat.messageInput')"
               rows="1"
-              class="flex-1 bg-transparent text-[14px] text-white light:text-gray-900 placeholder:text-white/30 light:placeholder:text-gray-400 focus:outline-none resize-none min-h-[36px] max-h-[120px] py-2 overflow-y-auto"
+              class="max-h-[120px] min-h-[36px] flex-1 resize-none overflow-y-auto bg-transparent py-2 text-[14px] text-foreground placeholder:text-muted-foreground focus:outline-none"
               @keydown.enter.exact.prevent="sendMessage"
               @input="autoResizeTextarea"
             />
-            <button type="submit" class="w-9 h-9 rounded-lg bg-emerald-600 hover:bg-emerald-500 light:bg-emerald-500 light:hover:bg-emerald-600 flex items-center justify-center transition-colors disabled:opacity-50" :disabled="!messageInput.trim() || isSending">
-              <Send class="w-4 h-4 text-white" />
+            <button
+              type="submit"
+              class="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
+              :disabled="!messageInput.trim() || isSending"
+              :aria-label="$t('chat.send')"
+              :aria-busy="isSending"
+            >
+              <Send class="h-4 w-4" aria-hidden="true" />
             </button>
           </form>
         </div>
       </template>
-    </div>
+    </section>
 
     <!-- Notes Side Panel -->
     <ConversationNotes

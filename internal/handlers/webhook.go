@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 
@@ -47,8 +48,84 @@ func (a *App) WebhookVerify(r *fastglue.Request) error {
 		return nil
 	}
 
-	a.Log.Warn("Webhook verification failed - token not found", "token", token)
+	a.Log.Warn("Webhook verification failed - token not found")
 	return r.SendErrorEnvelope(fasthttp.StatusForbidden, "Verification failed", nil, "")
+}
+
+// errMixedWebhookSecrets is returned when one payload references accounts
+// that are protected by different app secrets. A single X-Hub-Signature-256
+// can only prove that the sender knows one of them, so the request as a whole
+// cannot be trusted for the others.
+var errMixedWebhookSecrets = errors.New("webhook payload references accounts with different app secrets")
+
+// webhookAppSecret resolves the app secret that must have signed the payload
+// and a label describing where it came from (for logs).
+//
+// Every account referenced by the payload is considered, not just the first:
+// a change carrying a phone_number_id maps to that account, and a change
+// without one (WABA-level events such as template status updates) maps to
+// every account registered under the entry's WABA id. All referenced accounts
+// that have a secret configured must share the same secret; otherwise the
+// request is refused with errMixedWebhookSecrets, because a signature made
+// with one tenant's secret would otherwise authenticate events injected for
+// another tenant in the same body. When no referenced account has a secret,
+// the global whatsapp.app_secret from the config (if any) is used. An empty
+// secret means signature verification cannot be applied.
+func (a *App) webhookAppSecret(payload *WebhookPayload) (secret, source string, err error) {
+	seen := make(map[string]struct{})
+	add := func(s, src string) {
+		if s == "" {
+			return
+		}
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+		}
+		if secret == "" {
+			secret, source = s, src
+		}
+	}
+
+	for _, entry := range payload.Entry {
+		for _, change := range entry.Changes {
+			if phoneNumberID := change.Value.Metadata.PhoneNumberID; phoneNumberID != "" {
+				if account, err := a.getWhatsAppAccountCached(phoneNumberID); err == nil {
+					add(account.AppSecret, "phone_id "+phoneNumberID)
+				}
+				continue
+			}
+			if entry.ID != "" {
+				for _, s := range a.wabaAppSecrets(entry.ID) {
+					add(s, "waba_id "+entry.ID)
+				}
+			}
+		}
+	}
+
+	if len(seen) > 1 {
+		return "", "", errMixedWebhookSecrets
+	}
+	if secret == "" && a.Config != nil && a.Config.WhatsApp.AppSecret != "" {
+		secret, source = a.Config.WhatsApp.AppSecret, "config whatsapp.app_secret"
+	}
+	return secret, source, nil
+}
+
+// wabaAppSecrets returns the distinct, decrypted app secrets of every account
+// registered under the given WhatsApp Business Account id.
+func (a *App) wabaAppSecrets(wabaID string) []string {
+	var accounts []models.WhatsAppAccount
+	if err := a.DB.Where("business_id = ?", wabaID).Find(&accounts).Error; err != nil {
+		a.Log.Error("Failed to look up accounts for WABA", "error", err, "waba_id", wabaID)
+		return nil
+	}
+	secrets := make([]string, 0, len(accounts))
+	for i := range accounts {
+		a.decryptAccountSecrets(&accounts[i])
+		if accounts[i].AppSecret != "" {
+			secrets = append(secrets, accounts[i].AppSecret)
+		}
+	}
+	return secrets
 }
 
 // WebhookStatusError represents an error in a status update
@@ -170,27 +247,26 @@ func (a *App) WebhookHandler(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid payload", nil, "")
 	}
 
-	// Verify webhook signature before processing any fields.
-	// Find a phoneNumberID from any change to look up the account's AppSecret.
-	if len(signature) > 0 {
-		for _, entry := range payload.Entry {
-			for _, change := range entry.Changes {
-				phoneNumberID := change.Value.Metadata.PhoneNumberID
-				if phoneNumberID == "" {
-					continue
-				}
-				account, err := a.getWhatsAppAccountCached(phoneNumberID)
-				if err != nil || account.AppSecret == "" {
-					continue
-				}
-				if !verifyWebhookSignature(body, signature, []byte(account.AppSecret)) {
-					a.Log.Warn("Invalid webhook signature", "phone_id", phoneNumberID)
-					return r.SendErrorEnvelope(fasthttp.StatusForbidden, "Invalid signature", nil, "")
-				}
-				a.Log.Debug("Webhook signature verified successfully")
-				break
-			}
+	// Verify the webhook signature before processing any fields. The app
+	// secret is resolved from every account the payload references (see
+	// webhookAppSecret). When a secret applies, an unsigned request is
+	// rejected outright: Meta always signs its deliveries, so a missing
+	// header means the request did not come from Meta.
+	appSecret, secretSource, err := a.webhookAppSecret(&payload)
+	if err != nil {
+		a.Log.Warn("Rejected webhook", "error", err)
+		return r.SendErrorEnvelope(fasthttp.StatusForbidden, "Payload spans accounts with different app secrets", nil, "")
+	}
+	if appSecret != "" {
+		if len(signature) == 0 {
+			a.Log.Warn("Rejected unsigned webhook", "secret_source", secretSource)
+			return r.SendErrorEnvelope(fasthttp.StatusForbidden, "Missing signature", nil, "")
 		}
+		if !verifyWebhookSignature(body, signature, []byte(appSecret)) {
+			a.Log.Warn("Invalid webhook signature", "secret_source", secretSource)
+			return r.SendErrorEnvelope(fasthttp.StatusForbidden, "Invalid signature", nil, "")
+		}
+		a.Log.Debug("Webhook signature verified successfully")
 	}
 
 	// Process each entry
@@ -204,7 +280,9 @@ func (a *App) WebhookHandler(r *fastglue.Request) error {
 					"template_language", change.Value.MessageTemplateLanguage,
 					"waba_id", entry.ID,
 				)
-				go a.processTemplateStatusUpdate(entry.ID, change.Value.Event, change.Value.MessageTemplateName, change.Value.MessageTemplateLanguage, change.Value.Reason)
+				a.spawn(func() {
+					a.processTemplateStatusUpdate(entry.ID, change.Value.Event, change.Value.MessageTemplateName, change.Value.MessageTemplateLanguage, change.Value.Reason)
+				})
 				continue
 			}
 
@@ -212,7 +290,9 @@ func (a *App) WebhookHandler(r *fastglue.Request) error {
 			if change.Field == "user_preferences" {
 				for _, pref := range change.Value.UserPreferences {
 					if pref.Category == "marketing_messages" {
-						go a.processMarketingPreference(change.Value.Metadata.PhoneNumberID, pref.WaID, pref.UserID, pref.Value)
+						a.spawn(func() {
+							a.processMarketingPreference(change.Value.Metadata.PhoneNumberID, pref.WaID, pref.UserID, pref.Value)
+						})
 					}
 				}
 				continue
@@ -258,7 +338,9 @@ func (a *App) WebhookHandler(r *fastglue.Request) error {
 					"contact_phone_number", change.Value.ContactPhoneNumber,
 					"contact_name", change.Value.ContactName,
 				)
-				go a.processContactSync(phoneNumberID, change.Value.ContactPhoneNumber, change.Value.ContactName, change.Value.Action)
+				a.spawn(func() {
+					a.processContactSync(phoneNumberID, change.Value.ContactPhoneNumber, change.Value.ContactName, change.Value.Action)
+				})
 				continue
 			}
 
@@ -271,7 +353,7 @@ func (a *App) WebhookHandler(r *fastglue.Request) error {
 						"type", echo.Type,
 						"phone_number_id", phoneNumberID,
 					)
-					go a.processMessageEcho(phoneNumberID, echo)
+					a.spawn(func() { a.processMessageEcho(phoneNumberID, echo) })
 				}
 				continue
 			}
@@ -295,16 +377,24 @@ func (a *App) WebhookHandler(r *fastglue.Request) error {
 					msg.Interactive.Type == "call_permission_reply" &&
 					msg.Interactive.CallPermissionReply != nil {
 					cpr := msg.Interactive.CallPermissionReply
-					expTS, err := cpr.ExpirationTimestamp.Int64()
-					if err != nil {
-						a.Log.Error("Failed to parse call permission expiration timestamp", "error", err, "from", msg.From)
-						continue
+					// Meta omits expiration_timestamp for rejections and
+					// permanent grants; an absent value is not an error.
+					var expTS int64
+					if cpr.ExpirationTimestamp != "" {
+						parsed, err := cpr.ExpirationTimestamp.Int64()
+						if err != nil {
+							a.Log.Error("Failed to parse call permission expiration timestamp", "error", err, "from", msg.From)
+							continue
+						}
+						expTS = parsed
 					}
-					go a.processCallPermissionReply(phoneNumberID, msg.From, &CallPermissionReplyData{
-						Response:            cpr.Response,
-						IsPermanent:         cpr.IsPermanent,
-						ExpirationTimestamp: expTS,
-						ResponseSource:      cpr.ResponseSource,
+					a.spawn(func() {
+						a.processCallPermissionReply(phoneNumberID, msg.From, &CallPermissionReplyData{
+							Response:            cpr.Response,
+							IsPermanent:         cpr.IsPermanent,
+							ExpirationTimestamp: expTS,
+							ResponseSource:      cpr.ResponseSource,
+						})
 					})
 					continue
 				}
@@ -325,8 +415,8 @@ func (a *App) WebhookHandler(r *fastglue.Request) error {
 					continue
 				}
 
-				// Process message asynchronously
-				go a.processIncomingMessage(phoneNumberID, msg, profileName)
+				// Process message asynchronously (tracked + bounded, see App.spawn)
+				a.spawn(func() { a.processIncomingMessage(phoneNumberID, msg, profileName) })
 			}
 
 			// Process status updates
@@ -336,7 +426,7 @@ func (a *App) WebhookHandler(r *fastglue.Request) error {
 					"status", status.Status,
 				)
 
-				go a.processStatusUpdate(phoneNumberID, status)
+				a.spawn(func() { a.processStatusUpdate(phoneNumberID, status) })
 			}
 		}
 	}
@@ -352,8 +442,17 @@ func (a *App) processIncomingMessage(phoneNumberID string, msg IncomingTextMessa
 		}
 	}()
 
-	// Check for duplicate message - Meta sometimes sends the same message multiple times
+	// Meta retries deliveries and can send the same message twice within
+	// milliseconds. The database lookup catches replays of messages that were
+	// already saved; the in-flight set closes the window in which two copies
+	// are being processed concurrently and neither has been saved yet.
 	if msg.ID != "" {
+		if _, loaded := a.inflightMessages.LoadOrStore(msg.ID, struct{}{}); loaded {
+			a.Log.Debug("Duplicate message detected (already in flight), skipping", "message_id", msg.ID)
+			return
+		}
+		defer a.inflightMessages.Delete(msg.ID)
+
 		var existingMsg models.Message
 		if err := a.DB.Where("whats_app_message_id = ?", msg.ID).First(&existingMsg).Error; err == nil {
 			a.Log.Debug("Duplicate message detected, skipping", "message_id", msg.ID)
@@ -361,7 +460,11 @@ func (a *App) processIncomingMessage(phoneNumberID string, msg IncomingTextMessa
 		}
 	}
 
-	// Process the message with chatbot logic
+	// Process the message with chatbot logic, one message per conversation at
+	// a time: concurrent messages from the same contact would otherwise both
+	// load the same chatbot session and overwrite each other's state.
+	unlock := a.lockConversation(phoneNumberID, msg.From)
+	defer unlock()
 	a.processIncomingMessageFull(phoneNumberID, msg, profileName)
 }
 
@@ -377,8 +480,38 @@ func (a *App) processStatusUpdate(phoneNumberID string, status WebhookStatus) {
 
 	a.Log.Info("Processing status update", "message_id", messageID, "status", statusValue, "phone_number_id", phoneNumberID)
 
+	// Scope the lookup to the organization that owns the phone number so a
+	// callback for one tenant can never touch a message row of another.
+	orgID := uuid.Nil
+	if account, err := a.getWhatsAppAccountCached(phoneNumberID); err == nil {
+		orgID = account.OrganizationID
+	}
+
 	// Update messages table - this also handles campaign stats via incrementCampaignStat
-	a.updateMessageStatus(messageID, statusValue, status.Errors)
+	a.updateMessageStatus(orgID, messageID, statusValue, status.Errors)
+}
+
+// statusesBelow lists the statuses a message may currently have for a
+// transition to target to count as a progression. Failed overrides every
+// non-failed status.
+func statusesBelow(target models.MessageStatus) []models.MessageStatus {
+	all := []models.MessageStatus{
+		models.MessageStatusReceived, // legacy value, lowest priority
+		models.MessageStatusPending,
+		models.MessageStatusSent,
+		models.MessageStatusDelivered,
+		models.MessageStatusRead,
+	}
+	if target == models.MessageStatusFailed {
+		return all
+	}
+	out := make([]models.MessageStatus, 0, len(all))
+	for _, s := range all {
+		if statusPriority(s) < statusPriority(target) {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // statusPriority returns the priority of a status (higher = more progressed)
@@ -399,11 +532,17 @@ func statusPriority(status models.MessageStatus) int {
 	}
 }
 
-// updateMessageStatus updates the status of a regular message in the messages table
-func (a *App) updateMessageStatus(whatsappMsgID, statusValue string, errors []WebhookStatusError) {
+// updateMessageStatus updates the status of a regular message in the messages
+// table. orgID restricts the lookup to one organization; uuid.Nil (account
+// unknown) falls back to the unscoped legacy lookup.
+func (a *App) updateMessageStatus(orgID uuid.UUID, whatsappMsgID, statusValue string, errors []WebhookStatusError) {
 	// Find the message by WhatsApp message ID
 	var message models.Message
-	result := a.DB.Where("whats_app_message_id = ?", whatsappMsgID).First(&message)
+	query := a.DB.Where("whats_app_message_id = ?", whatsappMsgID)
+	if orgID != uuid.Nil {
+		query = query.Where("organization_id = ?", orgID)
+	}
+	result := query.First(&message)
 	if result.Error != nil {
 		a.Log.Debug("No message found for status update", "whats_app_message_id", whatsappMsgID)
 		return
@@ -450,8 +589,22 @@ func (a *App) updateMessageStatus(whatsappMsgID, statusValue string, errors []We
 		return
 	}
 
-	if err := a.DB.Model(&message).Updates(updates).Error; err != nil {
-		a.Log.Error("Failed to update message status", "error", err, "message_id", message.ID)
+	// Apply the transition atomically. Status webhooks for one message are
+	// processed concurrently (delivered and read often arrive together, and
+	// Meta retries), so the row may have moved on since it was read above.
+	// Only a row still at a lower-priority status is updated, and the
+	// counters/broadcast below run only when this call won the update.
+	res := a.DB.Model(&models.Message{}).
+		Where("id = ? AND status IN ?", message.ID, statusesBelow(newStatus)).
+		Updates(updates)
+	if res.Error != nil {
+		a.Log.Error("Failed to update message status", "error", res.Error, "message_id", message.ID)
+		return
+	}
+	if res.RowsAffected == 0 {
+		a.Log.Debug("Status update superseded by a concurrent update",
+			"message_id", message.ID,
+			"new_status", statusValue)
 		return
 	}
 
@@ -477,7 +630,7 @@ func (a *App) updateMessageStatus(whatsappMsgID, statusValue string, errors []We
 				}
 			}
 			a.DB.Model(&models.BulkMessageRecipient{}).
-				Where("whats_app_message_id = ?", whatsappMsgID).
+				Where("whats_app_message_id = ? AND status IN ?", whatsappMsgID, statusesBelow(newStatus)).
 				Updates(recipientUpdates)
 		}
 	}

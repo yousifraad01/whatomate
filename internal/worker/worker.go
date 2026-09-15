@@ -80,6 +80,39 @@ func (w *Worker) HandleRecipientJob(ctx context.Context, job *queue.RecipientJob
 		return nil // Not an error, just skip
 	}
 
+	// Serialize sends per recipient. Start -> Pause -> Start re-enqueues every
+	// recipient still pending while the first batch of jobs may still sit in
+	// the stream, so with several workers two jobs for the same recipient can
+	// be in flight at once; both would pass the pending check below and the
+	// customer would get the template twice. The lock covers the send window
+	// and expires on its own if the worker dies mid-send.
+	if w.Redis != nil {
+		lockKey := recipientSendLockKey(job.RecipientID)
+		acquired, err := w.Redis.SetNX(ctx, lockKey, "1", recipientSendLockTTL).Result()
+		if err != nil {
+			w.Log.Warn("Could not acquire recipient send lock, continuing without it", "error", err, "recipient_id", job.RecipientID)
+		} else if !acquired {
+			w.Log.Info("Recipient send already in progress on another worker, skipping", "recipient_id", job.RecipientID)
+			return nil
+		} else {
+			defer w.Redis.Del(context.WithoutCancel(ctx), lockKey)
+		}
+	}
+
+	// Idempotency: the queue can redeliver a job (worker crash, reclaim of a
+	// stale pending entry). Only recipients still pending are sent, so a
+	// redelivered job for an already-sent recipient is a no-op instead of a
+	// second message to the customer.
+	var recipientRow models.BulkMessageRecipient
+	if err := w.DB.Where("id = ? AND campaign_id = ?", job.RecipientID, job.CampaignID).First(&recipientRow).Error; err != nil {
+		w.Log.Warn("Recipient not found, skipping", "recipient_id", job.RecipientID, "campaign_id", job.CampaignID)
+		return nil
+	}
+	if recipientRow.Status != models.MessageStatusPending {
+		w.Log.Info("Recipient already processed, skipping", "recipient_id", job.RecipientID, "status", recipientRow.Status)
+		return nil
+	}
+
 	// Get WhatsApp account
 	var account models.WhatsAppAccount
 	if err := w.DB.Where("name = ? AND organization_id = ?", campaign.WhatsAppAccount, job.OrganizationID).First(&account).Error; err != nil {
@@ -115,8 +148,13 @@ func (w *Worker) HandleRecipientJob(ctx context.Context, job *queue.RecipientJob
 		HeaderParams:   job.HeaderParams,
 	}
 
-	// Send template message
-	waMessageID, err := w.sendTemplateMessage(ctx, &account, campaign.Template, recipient, campaign.HeaderMediaID, campaign.HeaderMediaFilename)
+	// Send with a context detached from the consumer's cancellation so a
+	// shutdown lets the in-flight request finish instead of aborting it
+	// half-way, which would mark the recipient failed for a message Meta may
+	// still deliver. The timeout keeps a hung upstream from blocking exit.
+	sendCtx, cancelSend := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+	defer cancelSend()
+	waMessageID, err := w.sendTemplateMessage(sendCtx, &account, campaign.Template, recipient, campaign.HeaderMediaID, campaign.HeaderMediaFilename)
 
 	// Create Message record
 	message := models.Message{
@@ -317,4 +355,14 @@ func (w *Worker) Close() error {
 		return w.Consumer.Close()
 	}
 	return nil
+}
+
+// recipientSendLockTTL bounds how long a worker may hold the per-recipient
+// send lock; it must exceed the 60 s send timeout used in HandleRecipientJob.
+const recipientSendLockTTL = 2 * time.Minute
+
+// recipientSendLockKey is the Redis key that serializes sends for one
+// campaign recipient across workers.
+func recipientSendLockKey(recipientID uuid.UUID) string {
+	return "whatomate:campaign:recipient:" + recipientID.String() + ":send"
 }

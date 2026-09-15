@@ -96,24 +96,73 @@ func TestCORS(t *testing.T) {
 	}
 }
 
-func TestRecovery(t *testing.T) {
+func TestRecoverHandler(t *testing.T) {
 	t.Parallel()
 
 	log := testutil.NopLogger()
-	recoveryMiddleware := middleware.Recovery(log)
 
-	t.Run("normal request passes through", func(t *testing.T) {
+	t.Run("panic in handler becomes a 500 response", func(t *testing.T) {
 		t.Parallel()
 
-		req := newTestRequest()
-		result := recoveryMiddleware(req)
+		h := middleware.RecoverHandler(func(ctx *fasthttp.RequestCtx) {
+			ctx.SetBodyString("partial output")
+			panic("boom")
+		}, log)
 
-		require.NotNil(t, result, "should return request")
+		ctx := &fasthttp.RequestCtx{}
+		require.NotPanics(t, func() { h(ctx) }, "panic must not escape the handler")
+		assert.Equal(t, fasthttp.StatusInternalServerError, ctx.Response.StatusCode())
+		assert.Contains(t, string(ctx.Response.Body()), "Internal server error")
+		assert.NotContains(t, string(ctx.Response.Body()), "partial output")
 	})
 
-	// Note: Testing panic recovery is tricky because the panic happens
-	// after the middleware returns. The Recovery middleware is designed
-	// to wrap handlers, not to be tested in isolation.
+	t.Run("normal handler passes through", func(t *testing.T) {
+		t.Parallel()
+
+		h := middleware.RecoverHandler(func(ctx *fasthttp.RequestCtx) {
+			ctx.SetStatusCode(fasthttp.StatusTeapot)
+		}, log)
+
+		ctx := &fasthttp.RequestCtx{}
+		h(ctx)
+		assert.Equal(t, fasthttp.StatusTeapot, ctx.Response.StatusCode())
+	})
+}
+
+func TestAuth_RejectsTokenWithNoneAlgorithm(t *testing.T) {
+	t.Parallel()
+
+	claims := middleware.JWTClaims{
+		UserID:         uuid.New(),
+		OrganizationID: uuid.New(),
+		Email:          "none@example.com",
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+		},
+	}
+	// "alg": "none" tokens carry no signature at all; they must never be
+	// accepted regardless of the configured secret.
+	token, err := jwt.NewWithClaims(jwt.SigningMethodNone, claims).SignedString(jwt.UnsafeAllowNoneSignatureType)
+	require.NoError(t, err)
+
+	req := newTestRequest()
+	req.RequestCtx.Request.Header.Set("Authorization", "Bearer "+token)
+
+	result := middleware.Auth(testJWTSecret)(req)
+	require.Nil(t, result, "unsigned token must be rejected")
+	assert.Equal(t, fasthttp.StatusUnauthorized, req.RequestCtx.Response.StatusCode())
+}
+
+func TestParseJWT_ReturnsClaimsForExpiredToken(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	token := generateTestToken(t, userID, uuid.New(), "expired@example.com", nil, -time.Minute)
+
+	claims, err := middleware.ParseJWT(token, testJWTSecret)
+	require.Error(t, err, "expired token must not validate")
+	require.NotNil(t, claims)
+	assert.Equal(t, userID, claims.UserID, "claims are still decoded so logout can revoke the JTI")
 }
 
 func TestAuth_ValidJWT(t *testing.T) {

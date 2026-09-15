@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -227,6 +229,7 @@ func (a *App) UpdateOrganizationSettings(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to update settings", nil, "")
 	}
 
+	a.InvalidateOrgSettingsCache(orgID)
 	if a.CallManager != nil {
 		a.CallManager.InvalidateOrgCallingSettingsCache(orgID)
 	}
@@ -313,19 +316,53 @@ func (a *App) MaskContactFields(orgID any, profileName, phoneNumber string) (str
 	return profileName, phoneNumber
 }
 
+// orgMaskCachePrefix keys the cached phone-masking flag per organization.
+// The flag is consulted by every contact/message list request, so it is
+// cached like the other rarely-changing settings and invalidated on save.
+const orgMaskCachePrefix = "org:mask_phone:"
+
 // ShouldMaskPhoneNumbers checks if phone masking is enabled for the organization
 func (a *App) ShouldMaskPhoneNumbers(orgID any) bool {
+	ctx := context.Background()
+	cacheKey := fmt.Sprintf("%s%v", orgMaskCachePrefix, orgID)
+
+	if a.Redis != nil {
+		if cached, err := a.Redis.Get(ctx, cacheKey).Result(); err == nil {
+			return cached == "1"
+		}
+	}
+
 	var org models.Organization
 	if err := a.DB.Where("id = ?", orgID).First(&org).Error; err != nil {
 		return false
 	}
 
+	mask := false
 	if org.Settings != nil {
 		if v, ok := org.Settings["mask_phone_numbers"].(bool); ok {
-			return v
+			mask = v
 		}
 	}
-	return false
+
+	if a.Redis != nil {
+		value := "0"
+		if mask {
+			value = "1"
+		}
+		a.Redis.Set(ctx, cacheKey, value, settingsCacheTTL)
+	}
+	return mask
+}
+
+// InvalidateOrgSettingsCache drops cached organization-level settings so the
+// next request re-reads them from the database.
+func (a *App) InvalidateOrgSettingsCache(orgID any) {
+	if a.Redis == nil {
+		return
+	}
+	a.Redis.Del(context.Background(),
+		fmt.Sprintf("%s%v", orgMaskCachePrefix, orgID),
+		fmt.Sprintf("%s%v", orgTimezoneCachePrefix, orgID))
 }
 
 // OrganizationResponse represents an organization in API responses
@@ -343,13 +380,29 @@ func (a *App) ListOrganizations(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
 
-	// Super admins or users with organizations:read permission
-	if !a.IsSuperAdmin(userID) && !a.HasPermission(userID, models.ResourceOrganizations, models.ActionRead) {
+	orgID, err := a.getOrgID(r)
+	if err != nil {
+		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
+	}
+
+	// Super admins see every organization. Everyone else needs
+	// organizations:read in the active organization and only sees the
+	// organizations they belong to: tenant names and ids are not public.
+	isSuperAdmin := a.IsSuperAdmin(userID)
+	if !isSuperAdmin && !a.HasPermission(userID, models.ResourceOrganizations, models.ActionRead, orgID) {
 		return r.SendErrorEnvelope(fasthttp.StatusForbidden, "Insufficient permissions", nil, "")
 	}
 
+	query := a.DB.Order("name ASC")
+	if !isSuperAdmin {
+		query = query.Where("id IN (?) OR id = (?)",
+			a.DB.Table("user_organizations").Select("organization_id").Where("user_id = ? AND deleted_at IS NULL", userID),
+			a.DB.Table("users").Select("organization_id").Where("id = ?", userID),
+		)
+	}
+
 	var orgs []models.Organization
-	if err := a.DB.Order("name ASC").Find(&orgs).Error; err != nil {
+	if err := query.Find(&orgs).Error; err != nil {
 		a.Log.Error("Failed to list organizations", "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to list organizations", nil, "")
 	}
@@ -703,6 +756,10 @@ func (a *App) UpdateOrganizationMemberRole(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "role_id is required", nil, "")
 	}
 
+	if targetUserID == actorID && !a.IsSuperAdmin(actorID) {
+		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Cannot change your own role", nil, "")
+	}
+
 	// Validate role exists and belongs to org
 	var role models.CustomRole
 	if err := a.DB.Where("id = ? AND organization_id = ?", req.RoleID, orgID).First(&role).Error; err != nil {
@@ -734,4 +791,44 @@ func (a *App) UpdateOrganizationMemberRole(r *fastglue.Request) error {
 		map[string]any{"role_id": previousRoleID}, map[string]any{"role_id": req.RoleID})
 
 	return r.SendEnvelope(map[string]string{"message": "Member role updated successfully"})
+}
+
+// orgTimezoneCachePrefix keys the cached IANA time zone name per organization.
+const orgTimezoneCachePrefix = "org:timezone:"
+
+// orgLocation returns the organization's configured time zone. Business-hours
+// and timing decisions must be made in the tenant's zone, not the server's
+// (containers usually run in UTC). When no zone is configured or the name is
+// invalid, the server's local zone is used, matching the previous behaviour.
+func (a *App) orgLocation(orgID uuid.UUID) *time.Location {
+	ctx := context.Background()
+	cacheKey := orgTimezoneCachePrefix + orgID.String()
+
+	name, found := "", false
+	if a.Redis != nil {
+		if cached, err := a.Redis.Get(ctx, cacheKey).Result(); err == nil {
+			name, found = cached, true
+		}
+	}
+	if !found {
+		var org models.Organization
+		if err := a.DB.Where("id = ?", orgID).First(&org).Error; err == nil && org.Settings != nil {
+			if v, ok := org.Settings["timezone"].(string); ok {
+				name = v
+			}
+		}
+		if a.Redis != nil {
+			a.Redis.Set(ctx, cacheKey, name, settingsCacheTTL)
+		}
+	}
+
+	if name == "" {
+		return time.Local
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		a.Log.Warn("Invalid organization timezone, using server local time", "org_id", orgID, "timezone", name)
+		return time.Local
+	}
+	return loc
 }

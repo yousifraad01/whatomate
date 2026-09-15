@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
+	"github.com/shridarpatil/whatomate/internal/middleware"
 	"github.com/stretchr/testify/require"
 	"github.com/zerodha/logf"
 )
@@ -116,6 +117,20 @@ func AssertEventually(t *testing.T, condition func() bool, timeout time.Duration
 // SetupTestRedis creates a connection to a test Redis instance.
 // Requires TEST_REDIS_URL environment variable to be set.
 // If not set, returns nil (tests should handle this gracefully).
+// SeedRefreshToken registers the JTI of a refresh token in Redis the way the
+// server does when it issues one, so RefreshToken accepts it as unrevoked.
+func SeedRefreshToken(t *testing.T, rdb *redis.Client, tokenString, secret string) {
+	t.Helper()
+
+	claims, _ := middleware.ParseJWT(tokenString, secret)
+	require.NotNil(t, claims)
+	require.NotEmpty(t, claims.ID, "refresh token must carry a JTI")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, rdb.Set(ctx, "refresh:"+claims.ID, claims.UserID.String(), time.Hour).Err())
+}
+
 func SetupTestRedis(t *testing.T) *redis.Client {
 	t.Helper()
 

@@ -220,7 +220,7 @@ func (a *App) processIncomingMessageFull(phoneNumberID string, msg IncomingTextM
 
 	// Check business hours if enabled
 	if settings.BusinessHours.Enabled && len(settings.BusinessHours.Hours) > 0 {
-		if !a.isWithinBusinessHours(settings.BusinessHours.Hours) {
+		if !a.isWithinBusinessHours(account.OrganizationID, settings.BusinessHours.Hours) {
 			// If automated responses are not allowed outside hours, send out-of-hours message and stop
 			if !settings.BusinessHours.AllowAutomatedOutside {
 				a.Log.Info("Outside business hours, sending out of hours message")
@@ -256,7 +256,7 @@ func (a *App) processIncomingMessageFull(phoneNumberID string, msg IncomingTextM
 		a.Log.Info("Transfer keyword matched", "response", keywordResponse.Body)
 		// Check business hours - if outside hours, send out of hours message instead
 		if settings.BusinessHours.Enabled && len(settings.BusinessHours.Hours) > 0 {
-			if !a.isWithinBusinessHours(settings.BusinessHours.Hours) {
+			if !a.isWithinBusinessHours(account.OrganizationID, settings.BusinessHours.Hours) {
 				a.Log.Info("Outside business hours, sending out of hours message instead of transfer")
 				if settings.BusinessHours.OutOfHoursMessage != "" {
 					if err := a.sendAndSaveTextMessage(account, contact, settings.BusinessHours.OutOfHoursMessage); err != nil {
@@ -1008,7 +1008,7 @@ func (a *App) generateOpenAIResponse(settings *models.ChatbotSettings, session *
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxAIResponseBytes))
 
 	if resp.StatusCode != 200 {
 		var errResp struct {
@@ -1111,7 +1111,7 @@ func (a *App) generateAnthropicResponse(settings *models.ChatbotSettings, sessio
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxAIResponseBytes))
 
 	if resp.StatusCode != 200 {
 		var errResp struct {
@@ -1144,8 +1144,9 @@ func (a *App) generateAnthropicResponse(settings *models.ChatbotSettings, sessio
 
 // generateGoogleResponse generates a response using Google Gemini API
 func (a *App) generateGoogleResponse(settings *models.ChatbotSettings, session *models.ChatbotSession, userMessage string, contextData string) (string, error) {
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s",
-		settings.AI.Model, settings.AI.APIKey)
+	// The key travels in a header, not the query string: a transport error
+	// embeds the request URL in the logged error text.
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent", settings.AI.Model)
 
 	// Build contents array
 	contents := []map[string]any{}
@@ -1216,6 +1217,7 @@ func (a *App) generateGoogleResponse(settings *models.ChatbotSettings, session *
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", settings.AI.APIKey)
 
 	resp, err := a.HTTPClient.Do(req)
 	if err != nil {
@@ -1223,7 +1225,7 @@ func (a *App) generateGoogleResponse(settings *models.ChatbotSettings, session *
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxAIResponseBytes))
 
 	if resp.StatusCode != 200 {
 		var errResp struct {
@@ -1291,14 +1293,15 @@ func (a *App) handleIncomingReaction(account *models.WhatsAppAccount, fromPhone,
 	// has different WAMIDs from sender vs recipient perspective.
 	// We match on the suffix after "FQIA" + 4 chars (type indicator like "ERgS" or "EhgU")
 	var message models.Message
-	if err := a.DB.Where("whats_app_message_id = ?", messageWAMID).First(&message).Error; err != nil {
+	orgScoped := a.DB.Where("organization_id = ?", account.OrganizationID)
+	if err := orgScoped.Where("whats_app_message_id = ?", messageWAMID).First(&message).Error; err != nil {
 		// Try matching on WAMID suffix (the unique message ID part)
 		if idx := strings.Index(messageWAMID, "FQIA"); idx != -1 {
 			// Extract suffix after "FQIA" + 4 char type indicator (e.g., "ERgS", "EhgU")
 			suffixStart := idx + 8
 			if suffixStart < len(messageWAMID) {
 				suffix := messageWAMID[suffixStart:]
-				if err := a.DB.Where("whats_app_message_id LIKE ?", "%"+suffix).First(&message).Error; err != nil {
+				if err := orgScoped.Where("whats_app_message_id LIKE ?", "%"+suffix).First(&message).Error; err != nil {
 					a.Log.Warn("Message not found for reaction", "wamid", messageWAMID, "suffix", suffix)
 					return
 				}
@@ -1561,7 +1564,7 @@ func (a *App) saveIncomingMessage(account *models.WhatsAppAccount, contact *mode
 	// Handle reply context - look up the original message by WhatsApp message ID
 	if replyToWAMID != "" {
 		var replyToMsg models.Message
-		if err := a.DB.Where("whats_app_message_id = ?", replyToWAMID).First(&replyToMsg).Error; err == nil {
+		if err := a.DB.Where("organization_id = ? AND whats_app_message_id = ?", account.OrganizationID, replyToWAMID).First(&replyToMsg).Error; err == nil {
 			message.IsReply = true
 			message.ReplyToMessageID = &replyToMsg.ID
 		} else {
@@ -1627,8 +1630,8 @@ func (a *App) saveIncomingMessage(account *models.WhatsAppAccount, contact *mode
 }
 
 // isWithinBusinessHours checks if current time is within configured business hours
-func (a *App) isWithinBusinessHours(businessHours models.JSONBArray) bool {
-	now := time.Now()
+func (a *App) isWithinBusinessHours(orgID uuid.UUID, businessHours models.JSONBArray) bool {
+	now := time.Now().In(a.orgLocation(orgID))
 	currentDay := int(now.Weekday()) // 0 = Sunday, 1 = Monday, etc.
 	currentTime := now.Format("15:04")
 

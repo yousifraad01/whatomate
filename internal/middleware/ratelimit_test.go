@@ -36,6 +36,42 @@ func TestRateLimit_AllowsUnderLimit(t *testing.T) {
 	}
 }
 
+func TestRateLimit_RepairsCounterWithoutExpiry(t *testing.T) {
+	t.Parallel()
+	rdb := testutil.SetupTestRedis(t)
+	if rdb == nil {
+		t.Skip("TEST_REDIS_URL not set")
+	}
+
+	prefix := "test_repair_" + uuid.New().String()[:8]
+	key := "ratelimit:" + prefix + ":10.0.0.9"
+	ctx := testutil.TestContext(t)
+
+	// Simulate a counter whose EXPIRE never ran (crash between INCR and EXPIRE
+	// in the old implementation): it exists with no TTL.
+	require.NoError(t, rdb.Set(ctx, key, "2", 0).Err())
+	ttl, err := rdb.TTL(ctx, key).Result()
+	require.NoError(t, err)
+	require.Less(t, ttl, time.Duration(0), "precondition: key has no expiry")
+
+	rl := middleware.RateLimit(middleware.RateLimitOpts{
+		Redis:     rdb,
+		Log:       testutil.NopLogger(),
+		Max:       5,
+		Window:    10 * time.Second,
+		KeyPrefix: prefix,
+	})
+
+	req := newTestRequest()
+	req.RequestCtx.SetRemoteAddr(mockAddr("10.0.0.9:12345"))
+	require.NotNil(t, rl(req), "third request within a limit of 5 must be allowed")
+
+	ttl, err = rdb.TTL(ctx, key).Result()
+	require.NoError(t, err)
+	assert.Greater(t, ttl, time.Duration(0), "the window must now expire")
+	assert.LessOrEqual(t, ttl, 10*time.Second)
+}
+
 func TestRateLimit_BlocksOverLimit(t *testing.T) {
 	t.Parallel()
 	rdb := testutil.SetupTestRedis(t)

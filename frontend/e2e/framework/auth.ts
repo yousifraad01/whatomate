@@ -33,7 +33,22 @@ export async function loginAs(page: Page, creds: Credentials): Promise<void> {
     // Ignore if on about:blank
   }
 
-  await page.goto('/login')
+  // Clearing the cookies can make an in-flight request of the previous page
+  // fail with 401 and the app redirects to /login at the same moment, which
+  // aborts our navigation (net::ERR_ABORTED). Retry once.
+  // Leave the previous SPA document first: once its cookies are gone, any
+  // in-flight request 401s and the app's interceptor redirects to /login on
+  // its own, which interrupts our navigation.
+  try {
+    await page.goto('about:blank')
+  } catch {
+    // interrupted by the app's own redirect; either way the old document is gone
+  }
+  try {
+    await page.goto('/login', { waitUntil: 'domcontentloaded' })
+  } catch {
+    await page.goto('/login', { waitUntil: 'domcontentloaded' })
+  }
   await page.locator('input[type="email"], input[name="email"]').fill(creds.email)
   await page.locator('input[type="password"], input[name="password"]').fill(creds.password)
   await page.locator('button[type="submit"]').click()

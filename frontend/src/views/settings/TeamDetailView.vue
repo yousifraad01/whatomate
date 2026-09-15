@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
+import { getErrorMessage } from '@/lib/api-utils'
 import { useTeamsStore } from '@/stores/teams'
 import { useUsersStore } from '@/stores/users'
 import { useAuthStore } from '@/stores/auth'
@@ -140,7 +141,7 @@ async function save() {
         name: form.value.name,
         description: form.value.description,
         assignment_strategy: form.value.assignment_strategy,
-        per_agent_timeout_secs: form.value.per_agent_timeout_secs,
+        per_agent_timeout_secs: Number(form.value.per_agent_timeout_secs) || 0,
       })
       hasChanges.value = false
       toast.success(t('teams.created', 'Team created'))
@@ -150,15 +151,15 @@ async function save() {
         name: form.value.name,
         description: form.value.description,
         assignment_strategy: form.value.assignment_strategy,
-        per_agent_timeout_secs: form.value.per_agent_timeout_secs,
+        per_agent_timeout_secs: Number(form.value.per_agent_timeout_secs) || 0,
         is_active: form.value.is_active,
       })
       await loadTeam()
       hasChanges.value = false
       toast.success(t('teams.updated', 'Team updated'))
     }
-  } catch {
-    toast.error(isNew.value ? t('teams.createFailed', 'Failed to create team') : t('teams.updateFailed', 'Failed to update team'))
+  } catch (err) {
+    toast.error(getErrorMessage(err, isNew.value ? t('teams.createFailed', 'Failed to create team') : t('teams.updateFailed', 'Failed to update team')))
   } finally {
     isSaving.value = false
   }
@@ -188,8 +189,8 @@ async function addMember(userId: string, role: 'manager' | 'agent') {
       is_available: (user as any)?.is_available ?? false,
     })
     toast.success(t('teams.memberAdded', 'Member added'))
-  } catch {
-    toast.error(t('teams.memberAddFailed', 'Failed to add member'))
+  } catch (err) {
+    toast.error(getErrorMessage(err, t('teams.memberAddFailed', 'Failed to add member')))
   }
 }
 
@@ -204,8 +205,8 @@ async function confirmRemoveMember() {
     await teamsStore.removeTeamMember(team.value.id, memberToRemove.value.user_id)
     members.value = members.value.filter(m => m.user_id !== memberToRemove.value!.user_id)
     toast.success(t('teams.memberRemoved', 'Member removed'))
-  } catch {
-    toast.error(t('teams.memberRemoveFailed', 'Failed to remove member'))
+  } catch (err) {
+    toast.error(getErrorMessage(err, t('teams.memberRemoveFailed', 'Failed to remove member')))
   }
   removeMemberDialogOpen.value = false
   memberToRemove.value = null

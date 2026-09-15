@@ -4,6 +4,8 @@ import (
 	"crypto/hmac"
 	"crypto/sha1" //nolint:gosec // SHA-1 is mandated by the coturn TURN REST API (RFC draft)
 	"encoding/base64"
+	"errors"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -102,6 +104,10 @@ type AppConfig struct {
 	Environment   string `koanf:"environment"` // development, staging, production
 	Debug         bool   `koanf:"debug"`
 	EncryptionKey string `koanf:"encryption_key"` // AES-256 key for encrypting secrets at rest
+	// DisableSelfRegistration closes POST /api/auth/register. Self-registration
+	// only needs an organization id, which appears in tokens and webhook
+	// payloads, so deployments that onboard users through admins should set it.
+	DisableSelfRegistration bool `koanf:"disable_self_registration"`
 }
 
 type ServerConfig struct {
@@ -187,14 +193,21 @@ type RateLimitConfig struct {
 	APIWindowSeconds    int  `koanf:"api_window_seconds"`
 }
 
+// DefaultConfigPath is the config file looked up when -config is not given.
+const DefaultConfigPath = "config.toml"
+
 // Load loads configuration from file and environment variables
 func Load(configPath string) (*Config, error) {
 	k := koanf.New(".")
 
-	// Load from config file if provided
+	// Load from config file if provided. The default path ("config.toml") is
+	// optional so a container can be configured through WHATOMATE_* variables
+	// alone; an explicitly requested file must exist.
 	if configPath != "" {
 		if err := k.Load(file.Provider(configPath), toml.Parser()); err != nil {
-			return nil, err
+			if configPath != DefaultConfigPath || !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
 		}
 	}
 

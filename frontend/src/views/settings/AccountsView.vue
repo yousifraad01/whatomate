@@ -252,11 +252,11 @@ async function confirmDelete() {
 </script>
 
 <template>
-  <div class="flex flex-col h-full bg-[#0a0a0b] light:bg-gray-50">
+  <div class="flex flex-col h-full bg-background">
     <PageHeader
       :title="$t('accounts.title')"
       :icon="Phone"
-      icon-gradient="bg-gradient-to-br from-emerald-500 to-green-600 shadow-emerald-500/20"
+      icon-gradient="bg-gradient-to-br from-emerald-500 to-green-600 "
       back-link="/settings"
       :breadcrumbs="breadcrumbs"
     >
@@ -432,17 +432,17 @@ async function confirmDelete() {
             </div>
 
             <div class="h-10 w-10 rounded-lg bg-emerald-500/10 light:bg-emerald-100/60 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform duration-300">
-              <Smartphone class="h-5 w-5 text-emerald-400 light:text-emerald-600" />
+              <Smartphone class="h-5 w-5 text-primary" />
             </div>
 
-            <h3 class="text-base font-semibold text-white light:text-gray-900 group-hover:text-emerald-400 light:group-hover:text-emerald-600 transition-colors duration-200">
+            <h3 class="text-base font-semibold text-foreground group-hover:text-emerald-400 light:group-hover:text-emerald-600 transition-colors duration-200">
               {{ $t('accounts.coexistenceTitle') }}
             </h3>
             <p class="text-xs text-gray-400 light:text-gray-600 mt-2 flex-grow leading-relaxed">
               {{ $t('accounts.coexistenceDesc') }}
             </p>
 
-            <div class="mt-5 flex items-center justify-between text-xs font-medium text-emerald-400 light:text-emerald-600">
+            <div class="mt-5 flex items-center justify-between text-xs font-medium text-primary">
               <span>{{ $t('accounts.selectMode') }}</span>
               <span class="group-hover:translate-x-1 transition-transform duration-200">→</span>
             </div>
@@ -464,7 +464,7 @@ async function confirmDelete() {
               <Network class="h-5 w-5 text-blue-400 light:text-blue-600" />
             </div>
 
-            <h3 class="text-base font-semibold text-white light:text-gray-900 group-hover:text-blue-400 light:group-hover:text-blue-600 transition-colors duration-200">
+            <h3 class="text-base font-semibold text-foreground group-hover:text-blue-400 light:group-hover:text-blue-600 transition-colors duration-200">
               {{ $t('accounts.classicTitle') }}
             </h3>
             <p class="text-xs text-gray-400 light:text-gray-600 mt-2 flex-grow leading-relaxed">

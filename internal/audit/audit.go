@@ -1,8 +1,11 @@
 package audit
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/shridarpatil/whatomate/internal/models"
@@ -144,11 +147,44 @@ func LogAudit(
 		Changes:        changesArr,
 	}
 
+	writers.Add(1)
 	go func() {
-		if err := db.Create(&entry).Error; err != nil {
+		defer writers.Done()
+		writerSem <- struct{}{}
+		defer func() { <-writerSem }()
+
+		ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+		defer cancel()
+		if err := db.WithContext(ctx).Create(&entry).Error; err != nil {
 			slog.Error("failed to create audit log", "error", err)
 		}
 	}()
+}
+
+// Audit writes are asynchronous so a slow database never delays the request
+// that produced them. They are tracked so shutdown can flush them, and bounded
+// so a burst of mutations cannot open an unbounded number of connections.
+var (
+	writers   sync.WaitGroup
+	writerSem = make(chan struct{}, 16)
+)
+
+const writeTimeout = 10 * time.Second
+
+// Flush waits for in-flight audit writes to complete, up to timeout. It
+// returns false when the timeout elapsed first.
+func Flush(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		writers.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 func extractSubField(val any, key string) any {

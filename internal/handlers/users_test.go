@@ -1708,3 +1708,44 @@ func TestApp_CreateUser_CreatedUserIsActive(t *testing.T) {
 	assert.NotEqual(t, "securePass123", dbUser.PasswordHash)
 	require.NoError(t, bcrypt.CompareHashAndPassword([]byte(dbUser.PasswordHash), []byte("securePass123")))
 }
+
+// Deactivating a user must revoke their permissions immediately, not when the
+// cached grant or their access token expires.
+func TestApp_UpdateUser_DeactivationRevokesPermissionsImmediately(t *testing.T) {
+	t.Parallel()
+
+	app := newTestApp(t)
+	org := testutil.CreateTestOrganization(t, app.DB)
+	adminRole := testutil.CreateAdminRole(t, app.DB, org.ID)
+	admin := testutil.CreateTestUser(t, app.DB, org.ID,
+		testutil.WithEmail(testutil.UniqueEmail("deact-revoke-admin")),
+		testutil.WithRoleID(&adminRole.ID),
+	)
+	agentRole := testutil.CreateAgentRole(t, app.DB, org.ID)
+	target := testutil.CreateTestUser(t, app.DB, org.ID,
+		testutil.WithEmail(testutil.UniqueEmail("deact-revoke-target")),
+		testutil.WithRoleID(&agentRole.ID),
+	)
+
+	// Warm the permission cache for the target, as a live session would.
+	require.True(t, app.HasPermission(target.ID, models.ResourceContacts, models.ActionRead, org.ID))
+
+	req := testutil.NewJSONRequest(t, map[string]any{"is_active": false})
+	testutil.SetAuthContext(req, org.ID, admin.ID)
+	testutil.SetPathParam(req, "id", target.ID.String())
+	require.NoError(t, app.UpdateUser(req))
+	require.Equal(t, fasthttp.StatusOK, testutil.GetResponseStatusCode(req))
+
+	assert.False(t, app.HasPermission(target.ID, models.ResourceContacts, models.ActionRead, org.ID),
+		"deactivated user must not keep cached permissions")
+	assert.False(t, app.HasPermission(target.ID, models.ResourceContacts, models.ActionRead),
+		"deactivated user must not keep cached permissions (default org key)")
+
+	// Reactivation restores access.
+	req = testutil.NewJSONRequest(t, map[string]any{"is_active": true})
+	testutil.SetAuthContext(req, org.ID, admin.ID)
+	testutil.SetPathParam(req, "id", target.ID.String())
+	require.NoError(t, app.UpdateUser(req))
+	require.Equal(t, fasthttp.StatusOK, testutil.GetResponseStatusCode(req))
+	assert.True(t, app.HasPermission(target.ID, models.ResourceContacts, models.ActionRead, org.ID))
+}

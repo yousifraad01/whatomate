@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import {
   Dialog,
   DialogContent,
@@ -8,7 +10,6 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
-import { Loader2 } from 'lucide-vue-next'
 
 const open = defineModel<boolean>('open', { default: false })
 
@@ -27,18 +28,8 @@ const props = withDefaults(defineProps<{
   cancelLabel?: string
   maxWidth?: string
 }>(), {
-  title: '',
-  editTitle: 'Edit Item',
-  createTitle: 'Create Item',
-  description: '',
-  editDescription: 'Update the item details.',
-  createDescription: 'Fill in the details to create a new item.',
   isEditing: false,
   isSubmitting: false,
-  submitLabel: '',
-  editSubmitLabel: 'Update',
-  createSubmitLabel: 'Create',
-  cancelLabel: 'Cancel',
   maxWidth: 'max-w-md',
 })
 
@@ -47,53 +38,70 @@ const emit = defineEmits<{
   cancel: []
 }>()
 
+const { t } = useI18n()
+
 function handleSubmit() {
+  if (props.isSubmitting) return
   emit('submit')
 }
 
 function handleCancel() {
+  if (props.isSubmitting) return
   open.value = false
   emit('cancel')
 }
 
+// While a submission is in flight the dialog must stay open: closing it via
+// Escape or an outside click would reset the form under a pending request.
+function preventCloseWhileSubmitting(event: Event) {
+  if (props.isSubmitting) event.preventDefault()
+}
+
 const computedTitle = computed(() => {
   if (props.title) return props.title
-  return props.isEditing ? props.editTitle : props.createTitle
+  return props.isEditing
+    ? (props.editTitle || t('common.editItem'))
+    : (props.createTitle || t('common.createItem'))
 })
 
 const computedDescription = computed(() => {
   if (props.description) return props.description
-  return props.isEditing ? props.editDescription : props.createDescription
+  return props.isEditing
+    ? (props.editDescription || t('common.editItemDesc'))
+    : (props.createDescription || t('common.createItemDesc'))
 })
 
 const computedSubmitLabel = computed(() => {
   if (props.submitLabel) return props.submitLabel
-  return props.isEditing ? props.editSubmitLabel : props.createSubmitLabel
+  return props.isEditing
+    ? (props.editSubmitLabel || t('common.update'))
+    : (props.createSubmitLabel || t('common.create'))
 })
-</script>
-
-<script lang="ts">
-import { computed } from 'vue'
 </script>
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent :class="[maxWidth, 'max-h-[90vh] overflow-y-auto']">
+    <DialogContent
+      :class="[maxWidth, 'max-h-[90vh] overflow-y-auto']"
+      @escape-key-down="preventCloseWhileSubmitting"
+      @pointer-down-outside="preventCloseWhileSubmitting"
+    >
       <DialogHeader>
         <DialogTitle>{{ computedTitle }}</DialogTitle>
         <DialogDescription>{{ computedDescription }}</DialogDescription>
       </DialogHeader>
 
-      <div class="py-4">
+      <form class="py-2" @submit.prevent="handleSubmit">
         <slot />
-      </div>
+        <!-- Lets Enter submit from any field without a visible extra button -->
+        <button type="submit" class="hidden" tabindex="-1" aria-hidden="true" />
+      </form>
 
       <DialogFooter>
-        <Button variant="outline" size="sm" @click="handleCancel">
-          {{ cancelLabel }}
+        <Button variant="outline" size="sm" :disabled="isSubmitting" @click="handleCancel">
+          {{ cancelLabel || t('common.cancel') }}
         </Button>
-        <Button size="sm" @click="handleSubmit" :disabled="isSubmitting">
-          <Loader2 v-if="isSubmitting" class="h-4 w-4 mr-2 animate-spin" />
+        <Button size="sm" :loading="isSubmitting" @click="handleSubmit">
           {{ computedSubmitLabel }}
         </Button>
       </DialogFooter>

@@ -54,6 +54,7 @@ interface WhatsAppAccount {
   phone_id: string
   business_id: string
   webhook_verify_token: string
+  business_calling_enabled?: boolean
   api_version: string
   is_default_incoming: boolean
   is_default_outgoing: boolean
@@ -275,7 +276,7 @@ onMounted(async () => {
   <DetailPageLayout
     :title="isNew ? $t('accounts.newAccount', 'New Account') : (account?.name || '')"
     :icon="Phone"
-    icon-gradient="bg-gradient-to-br from-emerald-500 to-green-600 shadow-emerald-500/20"
+    icon-gradient="bg-gradient-to-br from-emerald-500 to-green-600 "
     back-link="/settings/accounts"
     :breadcrumbs="breadcrumbs"
     :is-loading="isLoading"

@@ -9,7 +9,7 @@ func ClientSendChan(c *Client) <-chan []byte {
 
 // ClientAuthenticated returns whether the client has authenticated.
 func ClientAuthenticated(c *Client) bool {
-	return c.authenticated
+	return c.authenticated.Load()
 }
 
 // ClientUserID returns the client's user ID.

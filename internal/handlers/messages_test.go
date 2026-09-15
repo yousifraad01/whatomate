@@ -650,7 +650,7 @@ func TestApp_SendOutgoingMessage_AsyncOption(t *testing.T) {
 	require.NotNil(t, msg)
 
 	// Wait for async send to complete
-	app.WaitForBackgroundTasks()
+	app.WaitForBackgroundTasks(10 * time.Second)
 
 	// Now verify message was sent and status updated in DB
 	var dbMsg models.Message
@@ -730,7 +730,7 @@ func TestApp_SendOutgoingMessage_WithSentByUser(t *testing.T) {
 	require.NotNil(t, msg)
 
 	// Wait for async send
-	app.WaitForBackgroundTasks()
+	app.WaitForBackgroundTasks(10 * time.Second)
 
 	// Verify sent by user is recorded
 	var dbMsg models.Message

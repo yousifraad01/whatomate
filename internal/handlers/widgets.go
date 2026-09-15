@@ -2,13 +2,16 @@ package handlers
 
 import (
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/shridarpatil/whatomate/internal/models"
 	"github.com/valyala/fasthttp"
 	"github.com/zerodha/fastglue"
+	"golang.org/x/sync/errgroup"
 	"gorm.io/gorm"
 )
 
@@ -118,10 +121,13 @@ type DataPoint struct {
 }
 
 // Available data sources and their filterable fields
+// Every field listed here must also appear in allowedFilterFields (filters)
+// and allowedGroupByFields (group-by) for its source, otherwise the picker
+// offers a field the query silently drops.
 var widgetDataSources = map[string][]string{
 	"messages":  {"status", "direction", "message_type", "whatsapp_account"},
-	"contacts":  {"whatsapp_account", "is_read"},
-	"campaigns": {"status", "message_status"},
+	"contacts":  {"whatsapp_account", "is_read", "status"},
+	"campaigns": {"status", "whatsapp_account"},
 	"transfers": {"status", "source"},
 	"sessions":  {"status"},
 }
@@ -724,22 +730,42 @@ func (a *App) GetAllWidgetsData(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to list widgets", nil, "")
 	}
 
-	// Execute queries for all widgets
-	results := make(map[string]WidgetDataResponse)
+	// Execute the widget queries concurrently (bounded so one dashboard load
+	// cannot monopolise the connection pool). Each widget is independent, so
+	// a failing one is reported in "errors" instead of silently disappearing,
+	// which let the UI render a misleading 0 for it.
+	results := make(map[string]WidgetDataResponse, len(widgets))
+	failures := make(map[string]string)
+	var mu sync.Mutex
+
+	g := new(errgroup.Group)
+	g.SetLimit(widgetQueryConcurrency)
 	for _, widget := range widgets {
-		data, err := a.executeWidgetQuery(orgID, widget, fromStr, toStr)
-		if err != nil {
-			a.Log.Error("Failed to execute widget query", "error", err, "widget_id", widget.ID)
-			continue
-		}
-		data.WidgetID = widget.ID
-		results[widget.ID.String()] = data
+		g.Go(func() error {
+			data, err := a.executeWidgetQuery(orgID, widget, fromStr, toStr)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				a.Log.Error("Failed to execute widget query", "error", err, "widget_id", widget.ID)
+				failures[widget.ID.String()] = "Data unavailable"
+				return nil
+			}
+			data.WidgetID = widget.ID
+			results[widget.ID.String()] = data
+			return nil
+		})
 	}
+	_ = g.Wait()
 
 	return r.SendEnvelope(map[string]any{
-		"data": results,
+		"data":   results,
+		"errors": failures,
 	})
 }
+
+// widgetQueryConcurrency bounds how many widget queries run at once per
+// dashboard load; each widget issues 2-3 queries.
+const widgetQueryConcurrency = 4
 
 // executeWidgetQuery executes the query for a widget and returns the data
 func (a *App) executeWidgetQuery(orgID uuid.UUID, widget models.Widget, fromStr, toStr string) (WidgetDataResponse, error) {
@@ -825,6 +851,12 @@ func (a *App) executeWidgetQuery(orgID uuid.UUID, widget models.Widget, fromStr,
 	response.Value = currentValue
 	response.PrevValue = previousValue
 	response.Change = calculatePercentageChange(int64(previousValue), int64(currentValue))
+
+	// Number widgets carry a daily series for their sparkline. Only the count
+	// metric maps onto the per-day COUNT(*) that getChartData runs.
+	if widget.DisplayType == "number" && widget.GroupByField == "" && (widget.Metric == "" || widget.Metric == "count") {
+		response.ChartData = a.getChartData(orgID, widget, filters, periodStart, periodEnd)
+	}
 
 	// Get chart data if display type is chart
 	if widget.DisplayType == "chart" {
@@ -949,7 +981,7 @@ func (a *App) getChartData(orgID uuid.UUID, widget models.Widget, filters []Filt
 
 	// Build raw query for daily aggregation
 	query := fmt.Sprintf(`
-		SELECT DATE_TRUNC('day', %s) as date, COUNT(*) as count
+		SELECT to_char(DATE_TRUNC('day', %s), 'YYYY-MM-DD') as day, COUNT(*) as count
 		FROM %s
 		WHERE organization_id = ? AND %s >= ? AND %s <= ?
 	`, dateField, tableName, dateField, dateField)
@@ -957,24 +989,59 @@ func (a *App) getChartData(orgID uuid.UUID, widget models.Widget, filters []Filt
 	args := []any{orgID, start, end}
 	query, args = appendFilterSQL(widget.DataSource, query, args, filters)
 
-	query += fmt.Sprintf(" GROUP BY DATE_TRUNC('day', %s) ORDER BY date ASC", dateField)
+	query += fmt.Sprintf(" GROUP BY DATE_TRUNC('day', %s) ORDER BY day ASC", dateField)
 
 	type DailyCount struct {
-		Date  time.Time
+		Day   string
 		Count int64
 	}
 
 	var results []DailyCount
 	a.DB.Raw(query, args...).Scan(&results)
 
+	counts := make(map[string]float64, len(results))
 	for _, r := range results {
-		chartData = append(chartData, ChartPoint{
-			Label: r.Date.Format("Jan 02"),
-			Value: float64(r.Count),
-		})
+		counts[r.Day] += float64(r.Count)
 	}
 
-	return chartData
+	return fillDailySeries(counts, start, end)
+}
+
+// maxFilledDays caps the zero-filling of daily series so a multi-year custom
+// range does not produce thousands of points.
+const maxFilledDays = 120
+
+// fillDailySeries returns one point per calendar day between start and end
+// (inclusive, UTC) so charts and sparklines show quiet days as zero instead of
+// silently skipping them. Ranges longer than maxFilledDays keep only the days
+// that have data, in date order. Keys are YYYY-MM-DD strings.
+func fillDailySeries(counts map[string]float64, start, end time.Time) []ChartPoint {
+	first := time.Date(start.UTC().Year(), start.UTC().Month(), start.UTC().Day(), 0, 0, 0, 0, time.UTC)
+	last := time.Date(end.UTC().Year(), end.UTC().Month(), end.UTC().Day(), 0, 0, 0, 0, time.UTC)
+	days := int(last.Sub(first).Hours()/24) + 1
+
+	if days <= 0 || days > maxFilledDays {
+		keys := make([]string, 0, len(counts))
+		for k := range counts {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		points := make([]ChartPoint, 0, len(keys))
+		for _, k := range keys {
+			label := k
+			if d, err := time.Parse("2006-01-02", k); err == nil {
+				label = d.Format("Jan 02")
+			}
+			points = append(points, ChartPoint{Label: label, Value: counts[k]})
+		}
+		return points
+	}
+
+	points := make([]ChartPoint, 0, days)
+	for d := first; !d.After(last); d = d.AddDate(0, 0, 1) {
+		points = append(points, ChartPoint{Label: d.Format("Jan 02"), Value: counts[d.Format("2006-01-02")]})
+	}
+	return points
 }
 
 // resolveDataSourceTable returns the table name and date field for a data source
@@ -1002,6 +1069,7 @@ var allowedFilterFields = map[string]map[string]bool{
 		"status":           true,
 		"assigned_user_id": true,
 		"whatsapp_account": true,
+		"is_read":          true,
 	},
 	"campaigns": {
 		"status":           true,
@@ -1011,6 +1079,7 @@ var allowedFilterFields = map[string]map[string]bool{
 	},
 	"transfers": {
 		"status":    true,
+		"source":    true,
 		"team_id":   true,
 		"agent_id":  true,
 		"from_team": true,
@@ -1084,6 +1153,7 @@ func (a *App) getGroupedData(orgID uuid.UUID, widget models.Widget, filters []Fi
 		"message_type": true, "assigned_user_id": true, "channel": true,
 		"is_active": true, "priority": true, "category": true,
 		"type": true, "action_type": true, "provider": true,
+		"whatsapp_account": true, "source": true, "is_read": true,
 	}
 	if !allowedGroupByFields[widget.GroupByField] {
 		a.Log.Error("Invalid GroupByField", "field", widget.GroupByField)

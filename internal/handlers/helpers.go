@@ -18,6 +18,15 @@ import (
 // written an error envelope to the response. Callers should return nil to the framework.
 var errEnvelopeSent = errors.New("error envelope sent")
 
+// errUserInactive is returned by the permission loader for a deactivated user
+// so every permission check denies until the account is reactivated.
+var errUserInactive = errors.New("user is deactivated")
+
+// maxAIResponseBytes caps AI provider responses read into memory. A normal
+// completion is a few kilobytes; anything near this limit is a misbehaving
+// upstream rather than a legitimate reply.
+const maxAIResponseBytes = 4 << 20
+
 // parsePathUUID extracts a UUID from a path parameter. On failure, it sends a
 // 400 error envelope and returns uuid.Nil plus an error.
 func parsePathUUID(r *fastglue.Request, param, label string) (uuid.UUID, error) {
@@ -130,4 +139,65 @@ func parseDateRange(startStr, endStr string) (start, end time.Time, errMsg strin
 	}
 	end = endOfDay(end)
 	return start, end, ""
+}
+
+// maskedSecretValue replaces credential-bearing header values in API
+// responses for users who may read a configuration but not edit it.
+const maskedSecretValue = "••••••••"
+
+// maskConfigHeaders returns cfg with every value under its "headers" map
+// replaced by a placeholder unless canEdit is true. Headers of API-calling
+// configurations (AI contexts, custom actions) routinely carry bearer tokens,
+// which read-only users have no need to see. The original map is not
+// modified.
+func maskConfigHeaders(cfg map[string]any, canEdit bool) map[string]any {
+	if canEdit || cfg == nil {
+		return cfg
+	}
+	headers, ok := cfg["headers"].(map[string]any)
+	if !ok || len(headers) == 0 {
+		return cfg
+	}
+	out := make(map[string]any, len(cfg))
+	for k, v := range cfg {
+		out[k] = v
+	}
+	masked := make(map[string]any, len(headers))
+	for k := range headers {
+		masked[k] = maskedSecretValue
+	}
+	out["headers"] = masked
+	return out
+}
+
+// orgUserScope restricts a users query to members of the organization:
+// native users (users.organization_id) and cross-org members
+// (user_organizations). Listing endpoints already include both kinds, so
+// assigning contacts or team seats must accept both as well.
+func (a *App) orgUserScope(orgID uuid.UUID) *gorm.DB {
+	return a.DB.Where("users.organization_id = ? OR users.id IN (?)", orgID,
+		a.DB.Table("user_organizations").Select("user_id").Where("organization_id = ? AND deleted_at IS NULL", orgID))
+}
+
+// findOrgUser loads a user who is a member of the organization (native or
+// cross-org). Returns gorm.ErrRecordNotFound when they are not.
+func (a *App) findOrgUser(userID, orgID uuid.UUID) (*models.User, error) {
+	var user models.User
+	if err := a.orgUserScope(orgID).Where("users.id = ?", userID).First(&user).Error; err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+// roleUserCount counts the distinct users holding a role in the organization,
+// through either the legacy users.role_id column or a user_organizations
+// membership row.
+func (a *App) roleUserCount(orgID, roleID uuid.UUID) int64 {
+	var count int64
+	a.DB.Raw(`SELECT COUNT(*) FROM (
+		SELECT id AS user_id FROM users WHERE role_id = ? AND organization_id = ? AND deleted_at IS NULL
+		UNION
+		SELECT user_id FROM user_organizations WHERE role_id = ? AND organization_id = ? AND deleted_at IS NULL
+	) AS holders`, roleID, orgID, roleID, orgID).Scan(&count)
+	return count
 }

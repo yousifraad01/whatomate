@@ -535,3 +535,43 @@ func TestPublishCampaignStats_InvalidRedis(t *testing.T) {
 	err := pub.PublishCampaignStats(ctx, update)
 	assert.Error(t, err)
 }
+
+// TestConsume_RecoversWhenStreamDeleted verifies that a running consumer
+// recreates the stream and consumer group after the stream key is removed,
+// instead of failing every read with NOGROUP until the process restarts.
+func TestConsume_RecoversWhenStreamDeleted(t *testing.T) {
+	client := skipIfNoRedis(t)
+	cleanStream(t, client)
+	log := testutil.NopLogger()
+	ctx := testutil.TestContextWithTimeout(t, 20*time.Second)
+
+	consumer, err := queue.NewRedisConsumer(client, log)
+	require.NoError(t, err)
+	defer consumer.Close() //nolint:errcheck
+
+	handler := &mockHandler{}
+	consumeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		_ = consumer.Consume(consumeCtx, handler)
+	}()
+
+	// Simulate an operator (or a test suite) deleting the stream while the
+	// consumer is blocked in XREADGROUP; the group disappears with it.
+	require.NoError(t, client.Del(ctx, queue.StreamName).Err())
+
+	// A job enqueued afterwards recreates the stream without a group. The
+	// consumer must notice NOGROUP, recreate the group and deliver the job.
+	q := queue.NewRedisQueue(client, log)
+	job := makeRecipientJob()
+	require.NoError(t, q.EnqueueRecipient(ctx, job))
+
+	testutil.AssertEventually(t, func() bool {
+		return len(handler.getJobs()) >= 1
+	}, 15*time.Second, "consumer should recover from a deleted stream and process the job")
+
+	cancel()
+	received := handler.getJobs()
+	require.Len(t, received, 1)
+	assert.Equal(t, job.RecipientID, received[0].RecipientID)
+}

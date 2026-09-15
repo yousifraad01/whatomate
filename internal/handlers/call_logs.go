@@ -65,12 +65,21 @@ func (a *App) ListCallLogs(r *fastglue.Request) error {
 		countQuery = countQuery.Where("caller_phone LIKE ?", phoneLike)
 	}
 
-	// Date range filter
-	if start, ok := parseDateParam(r, "start_date"); ok {
+	// Date range filter (start_date/end_date; from/to accepted as aliases
+	// because the frontend service uses those names)
+	start, ok := parseDateParam(r, "start_date")
+	if !ok {
+		start, ok = parseDateParam(r, "from")
+	}
+	if ok {
 		query = query.Where("call_logs.created_at >= ?", start)
 		countQuery = countQuery.Where("created_at >= ?", start)
 	}
-	if end, ok := parseDateParam(r, "end_date"); ok {
+	end, ok := parseDateParam(r, "end_date")
+	if !ok {
+		end, ok = parseDateParam(r, "to")
+	}
+	if ok {
 		query = query.Where("call_logs.created_at <= ?", endOfDay(end))
 		countQuery = countQuery.Where("created_at <= ?", endOfDay(end))
 	}

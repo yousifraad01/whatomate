@@ -1,0 +1,43 @@
+# Keep the Docker build context small and free of secrets. The Go stage
+# copies the whole tree (COPY . .), so anything not needed to build the
+# binary or the frontend is excluded here.
+.git
+.github
+docs
+audit-artifacts
+
+# Frontend: sources are needed, installed/built artifacts are not
+frontend/node_modules
+frontend/dist
+frontend/playwright-report
+frontend/test-results
+frontend/e2e
+frontend/.env.local
+frontend/.env.*.local
+
+# The embedded bundle is produced inside the image by the frontend stage
+internal/frontend/dist/*
+!internal/frontend/dist/.gitkeep
+
+# Local runtime state and secrets
+config.toml
+uploads
+audio
+docker/.env
+*.log
+logs
+
+# Local build outputs
+whatomate
+whatomate-*.exe
+*.exe
+bin
+coverage.out
+coverage.html
+*.test
+
+# Editor / OS noise
+.vscode
+.idea
+.DS_Store
+Thumbs.db

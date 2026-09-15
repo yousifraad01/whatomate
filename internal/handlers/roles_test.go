@@ -101,13 +101,14 @@ func TestApp_CreateRole_Success(t *testing.T) {
 	app := newTestApp(t)
 	org := testutil.CreateTestOrganization(t, app.DB)
 	permissions := testutil.GetOrCreateTestPermissions(t, app.DB)
-	user := testutil.CreateTestUser(t, app.DB, org.ID, testutil.WithEmail(testutil.UniqueEmail("create-role")))
+	adminRole := testutil.CreateAdminRole(t, app.DB, org.ID)
+	user := testutil.CreateTestUser(t, app.DB, org.ID, testutil.WithRoleID(&adminRole.ID), testutil.WithEmail(testutil.UniqueEmail("create-role")))
 
 	reqBody := handlers.RoleRequest{
 		Name:        "New Role",
 		Description: "A new custom role",
 		IsDefault:   false,
-		Permissions: []string{"users:read", "users:write"},
+		Permissions: &[]string{"users:read", "users:write"},
 	}
 
 	req := testutil.NewJSONRequest(t, reqBody)
@@ -151,7 +152,7 @@ func TestApp_CreateRole_DuplicateName(t *testing.T) {
 	reqBody := handlers.RoleRequest{
 		Name:        "Existing Role",
 		Description: "Trying to create duplicate",
-		Permissions: []string{},
+		Permissions: &[]string{},
 	}
 
 	req := testutil.NewJSONRequest(t, reqBody)
@@ -171,7 +172,7 @@ func TestApp_CreateRole_MissingName(t *testing.T) {
 	reqBody := handlers.RoleRequest{
 		Name:        "",
 		Description: "Role without name",
-		Permissions: []string{},
+		Permissions: &[]string{},
 	}
 
 	req := testutil.NewJSONRequest(t, reqBody)
@@ -190,13 +191,14 @@ func TestApp_CreateRole_WithDefaultFlag(t *testing.T) {
 
 	// Create an existing default role
 	existingDefault := testutil.CreateTestRoleExact(t, app.DB, org.ID, "Old Default", false, true, nil)
-	user := testutil.CreateTestUser(t, app.DB, org.ID, testutil.WithEmail(testutil.UniqueEmail("create-default")))
+	adminRole := testutil.CreateAdminRole(t, app.DB, org.ID)
+	user := testutil.CreateTestUser(t, app.DB, org.ID, testutil.WithRoleID(&adminRole.ID), testutil.WithEmail(testutil.UniqueEmail("create-default")))
 
 	reqBody := handlers.RoleRequest{
 		Name:        "New Default Role",
 		Description: "This will be the new default",
 		IsDefault:   true,
-		Permissions: []string{},
+		Permissions: &[]string{},
 	}
 
 	req := testutil.NewJSONRequest(t, reqBody)
@@ -219,12 +221,13 @@ func TestApp_UpdateRole_Success(t *testing.T) {
 	permissions := testutil.GetOrCreateTestPermissions(t, app.DB)
 
 	role := testutil.CreateTestRoleExact(t, app.DB, org.ID, "Editable Role", false, false, permissions[:1])
-	user := testutil.CreateTestUser(t, app.DB, org.ID, testutil.WithEmail(testutil.UniqueEmail("update-role")))
+	adminRole := testutil.CreateAdminRole(t, app.DB, org.ID)
+	user := testutil.CreateTestUser(t, app.DB, org.ID, testutil.WithRoleID(&adminRole.ID), testutil.WithEmail(testutil.UniqueEmail("update-role")))
 
 	reqBody := handlers.RoleRequest{
 		Name:        "Updated Role Name",
 		Description: "Updated description",
-		Permissions: []string{"users:read", "users:write", "contacts:read"},
+		Permissions: &[]string{"users:read", "users:write", "contacts:read"},
 	}
 
 	req := testutil.NewJSONRequest(t, reqBody)
@@ -260,7 +263,7 @@ func TestApp_UpdateRole_SystemRoleOnlyDescription(t *testing.T) {
 	reqBody := handlers.RoleRequest{
 		Name:        "Changed Name",         // Should be ignored for system roles
 		Description: "Updated description",  // Only this should be updated
-		Permissions: []string{"users:read"}, // Should be ignored for system roles
+		Permissions: &[]string{"users:read"}, // Should be ignored for system roles
 	}
 
 	req := testutil.NewJSONRequest(t, reqBody)

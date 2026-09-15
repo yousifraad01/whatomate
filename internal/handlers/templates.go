@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/google/uuid"
@@ -277,7 +278,20 @@ func (a *App) UpdateTemplate(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "code_expiration_minutes must be between 1 and 90", nil, "")
 	}
 
-	// Update fields
+	// Update fields. Name and account are only editable while the template
+	// has not been submitted to Meta; the editor allows changing them for
+	// drafts and the old code silently dropped both.
+	if template.MetaTemplateID == "" {
+		if req.Name != "" {
+			template.Name = req.Name
+		}
+		if req.WhatsAppAccount != "" && req.WhatsAppAccount != template.WhatsAppAccount {
+			if _, err := a.resolveWhatsAppAccount(orgID, req.WhatsAppAccount); err != nil {
+				return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "WhatsApp account not found", nil, "")
+			}
+			template.WhatsAppAccount = req.WhatsAppAccount
+		}
+	}
 	if req.DisplayName != "" {
 		template.DisplayName = req.DisplayName
 	}
@@ -681,11 +695,19 @@ func (a *App) UploadTemplateMedia(r *fastglue.Request) error {
 	}
 	defer func() { _ = file.Close() }()
 
-	// Read file data
-	fileData := make([]byte, fileHeader.Size)
-	if _, err := file.Read(fileData); err != nil {
+	// Read file data. A single Read may return short for multipart files
+	// spilled to disk, which used to upload a truncated file to Meta; the
+	// size cap matches Meta's largest header media (100 MB documents).
+	if fileHeader.Size > maxTemplateMediaBytes {
+		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "File too large. Maximum size is 100MB", nil, "")
+	}
+	fileData, err := io.ReadAll(io.LimitReader(file, maxTemplateMediaBytes+1))
+	if err != nil {
 		a.Log.Error("Failed to read file data", "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to read file data", nil, "")
+	}
+	if int64(len(fileData)) > maxTemplateMediaBytes {
+		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "File too large. Maximum size is 100MB", nil, "")
 	}
 
 	// Determine mime type from Content-Type header or filename
@@ -805,3 +827,7 @@ func diffButtons(oldButtons, newButtons models.JSONBArray) []map[string]any {
 
 	return changes
 }
+
+// maxTemplateMediaBytes caps header media uploaded for a template (Meta
+// accepts documents up to 100 MB).
+const maxTemplateMediaBytes int64 = 100 << 20

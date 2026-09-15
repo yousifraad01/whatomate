@@ -207,6 +207,10 @@ func (r *CallRecorder) flushPage(lastPage bool) {
 		if r.writeErr == nil {
 			r.writeErr = err
 		}
+		// The page is lost either way; keeping it buffered would make the
+		// recorder accumulate every later packet in memory for the rest of
+		// the call.
+		r.pageBuf = r.pageBuf[:0]
 		return
 	}
 	r.pageSeqNo++

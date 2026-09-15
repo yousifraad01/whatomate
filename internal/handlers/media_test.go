@@ -123,9 +123,12 @@ func TestApp_ServeMedia_RejectsSymlink(t *testing.T) {
 	target := filepath.Join(outsideDir, "real.txt")
 	require.NoError(t, os.WriteFile(target, []byte("contents"), 0644))
 
-	// Symlink inside storage pointing to outside file.
+	// Symlink inside storage pointing to outside file. Creating symlinks
+	// needs elevated privileges on Windows; skip rather than fail there.
 	link := filepath.Join(dir, "images", "linked.txt")
-	require.NoError(t, os.Symlink(target, link))
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks are not available in this environment: %v", err)
+	}
 
 	msg := makeMediaMessage(t, app, org.ID, contact.ID, "images/linked.txt")
 

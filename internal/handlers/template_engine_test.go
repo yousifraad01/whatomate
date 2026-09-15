@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -702,4 +703,40 @@ func TestExtractResponseMapping_PartialMatch(t *testing.T) {
 	assert.Equal(t, "Alice", result["user_name"])
 	_, hasEmail := result["email"]
 	assert.False(t, hasEmail)
+}
+
+// A loop item whose value contains a for-block must be emitted verbatim. The
+// old implementation spliced the expanded output back into the template and
+// rescanned it, so a contact-supplied value such as a WhatsApp Flow answer
+// containing "{{for ...}}" re-expanded on every pass and never terminated.
+func TestProcessTemplate_LoopValueContainingForBlockIsNotReExpanded(t *testing.T) {
+	t.Parallel()
+	data := map[string]any{
+		"items": []any{"{{for x in items}}{{x}}{{endfor}}", "plain"},
+	}
+	done := make(chan string, 1)
+	go func() {
+		done <- processTemplate("{{for item in items}}<{{item}}>{{endfor}}|{{for item in items}}({{item}}){{endfor}}", data)
+	}()
+	select {
+	case result := <-done:
+		// The trailing variable pass still strips the bare {{x}} and {{endfor}}
+		// tokens once (bounded, like any other unknown placeholder); what must
+		// never happen is a second loop expansion.
+		assert.Equal(t,
+			"<{{for x in items}}><plain>|({{for x in items}})(plain)",
+			result)
+	case <-time.After(5 * time.Second):
+		t.Fatal("processTemplate did not terminate")
+	}
+}
+
+func TestProcessTemplate_MultipleLoopsAndSurroundingText(t *testing.T) {
+	t.Parallel()
+	data := map[string]any{
+		"a": []any{1, 2},
+		"b": []map[string]any{{"n": "x"}, {"n": "y"}},
+	}
+	result := processTemplate("start {{for i in a}}[{{i}}:{{i_index}}]{{endfor}} mid {{for o in b}}({{o.n}}){{endfor}} end {{for z in missing}}never{{endfor}}.", data)
+	assert.Equal(t, "start [1:0][2:1] mid (x)(y) end .", result)
 }

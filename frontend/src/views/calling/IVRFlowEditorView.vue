@@ -36,6 +36,7 @@ const teamsStore = useTeamsStore()
 
 const flowId = computed(() => route.params.id as string)
 const flowName = ref('')
+const flowDescription = ref('')
 const isActive = ref(true)
 const isCallStart = ref(false)
 const isOutgoingEnd = ref(false)
@@ -321,6 +322,8 @@ async function saveFlow() {
     const flowData = toFlowData()
     const updated = await callingStore.updateIVRFlow(flowId.value, {
       name: flowName.value,
+      // The backend overwrites description whenever name is sent.
+      description: flowDescription.value,
       is_active: isActive.value,
       is_call_start: isCallStart.value,
       is_outgoing_end: isOutgoingEnd.value,
@@ -371,6 +374,7 @@ async function loadFlow() {
     const res = await ivrFlowsService.get(flowId.value)
     const flow = (res.data as any)?.data || res.data
     flowName.value = flow.name
+    flowDescription.value = flow.description || ''
     isActive.value = flow.is_active
     isCallStart.value = flow.is_call_start
     isOutgoingEnd.value = flow.is_outgoing_end

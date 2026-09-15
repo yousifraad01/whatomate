@@ -136,15 +136,9 @@ func (a *App) ConnectCallTransfer(r *fastglue.Request) error {
 		}
 	}
 
-	// Atomically claim the transfer — concurrent accepts are rejected
-	res := a.DB.Model(&models.CallTransfer{}).
-		Where("id = ? AND status = ?", transferID, models.CallTransferStatusWaiting).
-		Update("status", models.CallTransferStatusConnected)
-	if res.RowsAffected == 0 {
-		return r.SendErrorEnvelope(fasthttp.StatusConflict, "Transfer was already accepted by another agent", nil, "")
-	}
-
-	// Parse SDP offer from body
+	// Validate the request before claiming the transfer: a claim followed by
+	// a 400/403 used to leave the row "connected" with no agent, and nothing
+	// reverted it.
 	var req struct {
 		SDPOffer string `json:"sdp_offer"`
 	}
@@ -157,6 +151,14 @@ func (a *App) ConnectCallTransfer(r *fastglue.Request) error {
 
 	if err := a.requireCallingEnabled(r, orgID); err != nil {
 		return nil
+	}
+
+	// Atomically claim the transfer — concurrent accepts are rejected
+	res := a.DB.Model(&models.CallTransfer{}).
+		Where("id = ? AND status = ?", transferID, models.CallTransferStatusWaiting).
+		Update("status", models.CallTransferStatusConnected)
+	if res.RowsAffected == 0 {
+		return r.SendErrorEnvelope(fasthttp.StatusConflict, "Transfer was already accepted by another agent", nil, "")
 	}
 
 	sdpAnswer, err := a.CallManager.ConnectAgentToTransfer(transferID, userID, req.SDPOffer)
@@ -211,13 +213,19 @@ func (a *App) HangupCallTransfer(r *fastglue.Request) error {
 
 // HoldCall puts an active call on hold and plays hold music to the caller.
 func (a *App) HoldCall(r *fastglue.Request) error {
-	_, _, err := a.requireAuth(r, models.ResourceCallTransfers, models.ActionWrite)
+	orgID, _, err := a.requireAuth(r, models.ResourceCallTransfers, models.ActionWrite)
 	if err != nil {
 		return nil
 	}
 
 	callLogID, err := parsePathUUID(r, "id", "call log")
 	if err != nil {
+		return nil
+	}
+
+	// The live-call registry is process-wide; make sure the call belongs to
+	// the caller's organization before touching it.
+	if _, err := findByIDAndOrg[models.CallLog](a.DB, r, callLogID, orgID, "Call log"); err != nil {
 		return nil
 	}
 
@@ -234,13 +242,17 @@ func (a *App) HoldCall(r *fastglue.Request) error {
 
 // ResumeCall takes an active call off hold and restores the audio bridge.
 func (a *App) ResumeCall(r *fastglue.Request) error {
-	_, _, err := a.requireAuth(r, models.ResourceCallTransfers, models.ActionWrite)
+	orgID, _, err := a.requireAuth(r, models.ResourceCallTransfers, models.ActionWrite)
 	if err != nil {
 		return nil
 	}
 
 	callLogID, err := parsePathUUID(r, "id", "call log")
 	if err != nil {
+		return nil
+	}
+
+	if _, err := findByIDAndOrg[models.CallLog](a.DB, r, callLogID, orgID, "Call log"); err != nil {
 		return nil
 	}
 

@@ -37,7 +37,22 @@ export async function login(page: Page, user: TestUser) {
 
   // Use domcontentloaded: vite dev server keeps the browser 'load' event pending
   // due to HMR websocket + async chunk loading, which makes the default wait hang.
-  await page.goto('/login', { waitUntil: 'domcontentloaded' })
+  // Leave the previous SPA document first: once its cookies are gone, any
+  // in-flight request 401s and the app's interceptor redirects to /login on
+  // its own, which interrupts our navigation.
+  try {
+    await page.goto('about:blank')
+  } catch {
+    // interrupted by the app's own redirect; either way the old document is gone
+  }
+  try {
+    await page.goto('/login', { waitUntil: 'domcontentloaded' })
+  } catch {
+    // Clearing the cookies makes an in-flight request of the previous page
+    // fail with 401, and the app's interceptor redirects to /login at the same
+    // moment, which aborts our navigation (net::ERR_ABORTED). Retry once.
+    await page.goto('/login', { waitUntil: 'domcontentloaded' })
+  }
   await page.locator('input[name="email"], input[type="email"]').fill(user.email)
   await page.locator('input[name="password"], input[type="password"]').fill(user.password)
   await page.locator('button[type="submit"]').click()

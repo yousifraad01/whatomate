@@ -1,0 +1,33 @@
+# Dependency update policy. Updates arrive as grouped weekly pull requests so
+# the CI matrix (Go tests, lint, E2E) validates them together instead of one
+# PR per package. Major Go module and npm bumps are still separate PRs so a
+# breaking change is reviewed on its own.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      go_modules:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: npm
+    directory: "/frontend"
+    schedule:
+      interval: weekly
+    groups:
+      frontend:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: docker
+    directory: "/docker"
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly

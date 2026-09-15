@@ -160,14 +160,14 @@ function formatNoteTime(dateStr: string) {
 </script>
 
 <template>
-  <div id="notes-panel" class="w-80 border-l border-white/[0.08] light:border-gray-200 bg-[#111113] light:bg-white flex flex-col">
+  <div id="notes-panel" class="w-80 border-l border-border bg-[#111113] light:bg-white flex flex-col">
     <!-- Header -->
-    <div class="px-4 py-3 border-b border-white/[0.08] light:border-gray-200 flex items-center justify-between">
+    <div class="px-4 py-3 border-b border-border flex items-center justify-between">
       <div class="flex items-center gap-2">
         <div class="h-7 w-7 rounded-lg bg-amber-500/15 flex items-center justify-center">
           <StickyNote class="h-4 w-4 text-amber-400 light:text-amber-600" />
         </div>
-        <span class="text-sm font-semibold text-white light:text-gray-900">{{ t('chat.internalNotes') }}</span>
+        <span class="text-sm font-semibold text-foreground">{{ t('chat.internalNotes') }}</span>
         <Badge v-if="notesStore.notes.length > 0" class="bg-amber-500/20 text-amber-400 light:bg-amber-100 light:text-amber-700 border-0 text-[10px] px-1.5 py-0">
           {{ notesStore.notes.length }}
         </Badge>
@@ -187,12 +187,12 @@ function formatNoteTime(dateStr: string) {
       <div class="space-y-3">
         <!-- Loading older notes -->
         <div v-if="notesStore.isLoadingOlder" class="flex justify-center py-2">
-          <Loader2 class="h-4 w-4 animate-spin text-white/30 light:text-gray-400" />
+          <Loader2 class="h-4 w-4 animate-spin text-muted-foreground" />
         </div>
 
         <!-- Initial loading state -->
         <div v-if="notesStore.isLoading" class="flex justify-center py-8">
-          <Loader2 class="h-5 w-5 animate-spin text-white/30 light:text-gray-400" />
+          <Loader2 class="h-5 w-5 animate-spin text-muted-foreground" />
         </div>
 
         <!-- Notes (chronological: oldest first, latest last) -->
@@ -200,7 +200,7 @@ function formatNoteTime(dateStr: string) {
           <div
             v-for="note in notesStore.notes"
             :key="note.id"
-            class="group relative rounded-xl p-3 backdrop-blur-sm border border-white/[0.06] light:border-gray-200 bg-gradient-to-br from-white/[0.04] to-white/[0.02] light:from-gray-50 light:to-white hover:from-white/[0.06] hover:to-white/[0.03] light:hover:from-gray-100 light:hover:to-gray-50 transition-all duration-200"
+            class="group relative rounded-xl p-3 backdrop-blur-sm border border-border bg-gradient-to-br from-white/[0.04] to-white/[0.02] light:from-gray-50 light:to-white hover:from-white/[0.06] hover:to-white/[0.03] light:hover:from-gray-100 light:hover:to-gray-50 transition-all duration-200"
           >
             <!-- Gradient accent line -->
             <div class="absolute top-0 left-3 right-3 h-[2px] rounded-full bg-gradient-to-r from-amber-500/60 via-orange-500/40 to-transparent" />
@@ -209,7 +209,7 @@ function formatNoteTime(dateStr: string) {
             <template v-if="editingNoteId === note.id">
               <Textarea
                 v-model="editingContent"
-                class="min-h-[60px] max-h-[100px] resize-none text-sm bg-white/[0.04] light:bg-gray-50 border-amber-500/20 light:border-amber-200 mt-1"
+                class="min-h-[60px] max-h-[100px] resize-none text-sm bg-muted/50 border-amber-500/20 light:border-amber-200 mt-1"
                 :rows="2"
                 @keydown.meta.enter.prevent="saveEdit(note.id)"
                 @keydown.ctrl.enter.prevent="saveEdit(note.id)"
@@ -234,14 +234,14 @@ function formatNoteTime(dateStr: string) {
             <!-- Display mode -->
             <template v-else>
               <div class="flex items-start gap-2.5 mt-1">
-                <Avatar class="h-6 w-6 shrink-0 ring-1 ring-white/[0.08] light:ring-gray-200">
+                <Avatar class="h-6 w-6 shrink-0 ">
                   <AvatarFallback :class="'text-[10px] bg-gradient-to-br text-white ' + getAvatarGradient(note.created_by_name)">
                     {{ getInitials(note.created_by_name) }}
                   </AvatarFallback>
                 </Avatar>
                 <div class="flex-1 min-w-0">
                   <div class="flex items-center justify-between mb-1">
-                    <span class="text-xs font-medium text-white/70 light:text-gray-700">{{ note.created_by_name }}</span>
+                    <span class="text-xs font-medium text-foreground">{{ note.created_by_name }}</span>
                     <div class="flex items-center gap-1">
                       <!-- Hover actions (own notes only) -->
                       <div
@@ -249,7 +249,7 @@ function formatNoteTime(dateStr: string) {
                         class="opacity-0 group-hover:opacity-100 transition-opacity flex gap-0.5"
                       >
                         <button
-                          class="h-5 w-5 rounded-md flex items-center justify-center hover:bg-white/[0.08] light:hover:bg-gray-200 text-white/30 hover:text-white/60 light:text-gray-400 light:hover:text-gray-600 transition-colors"
+                          class="h-5 w-5 rounded-md flex items-center justify-center hover:bg-accent text-white/30 hover:text-white/60 light:text-gray-400 light:hover:text-gray-600 transition-colors"
                           @click="startEditing(note.id, note.content)"
                         >
                           <Pencil class="h-3 w-3" />
@@ -261,10 +261,10 @@ function formatNoteTime(dateStr: string) {
                           <Trash2 class="h-3 w-3" />
                         </button>
                       </div>
-                      <span class="text-[10px] text-white/30 light:text-gray-400">{{ formatNoteTime(note.created_at) }}</span>
+                      <span class="text-[10px] text-muted-foreground">{{ formatNoteTime(note.created_at) }}</span>
                     </div>
                   </div>
-                  <p class="text-[13px] text-white/60 light:text-gray-600 leading-relaxed whitespace-pre-wrap break-words">{{ note.content }}</p>
+                  <p class="text-[13px] text-muted-foreground leading-relaxed whitespace-pre-wrap break-words">{{ note.content }}</p>
                 </div>
               </div>
             </template>
@@ -276,7 +276,7 @@ function formatNoteTime(dateStr: string) {
           <div class="h-12 w-12 rounded-xl bg-amber-500/10 light:bg-amber-50 flex items-center justify-center mb-3">
             <StickyNote class="h-6 w-6 text-amber-400/50 light:text-amber-400" />
           </div>
-          <p class="text-sm font-medium text-white/40 light:text-gray-500 mb-1">{{ t('chat.noNotes') }}</p>
+          <p class="text-sm font-medium text-muted-foreground mb-1">{{ t('chat.noNotes') }}</p>
           <p class="text-xs text-white/25 light:text-gray-400">{{ t('chat.writeNote') }}</p>
         </div>
 
@@ -286,12 +286,12 @@ function formatNoteTime(dateStr: string) {
     </ScrollArea>
 
     <!-- Add note input -->
-    <div class="p-4 border-t border-white/[0.08] light:border-gray-200">
-      <div class="flex items-center gap-2 p-2 rounded-xl bg-white/[0.06] light:bg-gray-100 border border-white/[0.08] light:border-gray-200">
+    <div class="p-4 border-t border-border">
+      <div class="flex items-center gap-2 p-2 rounded-xl bg-muted border border-border">
         <textarea
           v-model="newNoteContent"
           :placeholder="t('chat.writeNote') + '...'"
-          class="flex-1 bg-transparent text-[14px] text-white light:text-gray-900 placeholder:text-white/30 light:placeholder:text-gray-400 focus:outline-none resize-none min-h-[36px] max-h-[120px] py-2 overflow-y-auto"
+          class="flex-1 bg-transparent text-[14px] text-foreground placeholder:text-muted-foreground focus:outline-none resize-none min-h-[36px] max-h-[120px] py-2 overflow-y-auto"
           rows="1"
           @keydown.enter.exact.prevent="addNote"
         />

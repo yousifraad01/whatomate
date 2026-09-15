@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"regexp"
@@ -27,8 +28,8 @@ type CustomActionRequest struct {
 	Icon         string            `json:"icon"`
 	ActionType   models.ActionType `json:"action_type"` // webhook, url, javascript
 	Config       map[string]any    `json:"config"`
-	IsActive     bool              `json:"is_active"`
-	DisplayOrder int               `json:"display_order"`
+	IsActive     *bool             `json:"is_active"`
+	DisplayOrder *int              `json:"display_order"`
 }
 
 // CustomActionResponse represents the API response for a custom action
@@ -76,12 +77,30 @@ type redirectToken struct {
 	ExpiresAt time.Time
 }
 
+// jsActionTimeout is the CPU-time budget for one custom JavaScript action.
+const jsActionTimeout = 2 * time.Second
+
+// storeRedirectToken registers a one-time redirect token and drops expired
+// entries so tokens whose redirect was never followed cannot accumulate.
+func storeRedirectToken(token, url string) {
+	now := time.Now()
+	redirectTokenMutex.Lock()
+	defer redirectTokenMutex.Unlock()
+	for k, v := range redirectTokens {
+		if now.After(v.ExpiresAt) {
+			delete(redirectTokens, k)
+		}
+	}
+	redirectTokens[token] = redirectToken{URL: url, ExpiresAt: now.Add(30 * time.Second)}
+}
+
 // ListCustomActions returns all custom actions for the organization
 func (a *App) ListCustomActions(r *fastglue.Request) error {
-	orgID, err := a.getOrgID(r)
+	orgID, userID, err := a.getOrgAndUserID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
+	canEdit := a.HasPermission(userID, models.ResourceCustomActions, models.ActionWrite, orgID)
 
 	pg := parsePagination(r)
 	search := string(r.RequestCtx.QueryArgs().Peek("search"))
@@ -107,6 +126,7 @@ func (a *App) ListCustomActions(r *fastglue.Request) error {
 	result := make([]CustomActionResponse, len(actions))
 	for i, action := range actions {
 		result[i] = customActionToResponse(action)
+		result[i].Config = maskConfigHeaders(result[i].Config, canEdit)
 	}
 
 	return r.SendEnvelope(listEnvelope("custom_actions", result, total, pg))
@@ -114,10 +134,11 @@ func (a *App) ListCustomActions(r *fastglue.Request) error {
 
 // GetCustomAction returns a single custom action by ID
 func (a *App) GetCustomAction(r *fastglue.Request) error {
-	orgID, err := a.getOrgID(r)
+	orgID, userID, err := a.getOrgAndUserID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
+	canEdit := a.HasPermission(userID, models.ResourceCustomActions, models.ActionWrite, orgID)
 
 	actionID, err := parsePathUUID(r, "id", "action")
 	if err != nil {
@@ -129,7 +150,9 @@ func (a *App) GetCustomAction(r *fastglue.Request) error {
 		return nil
 	}
 
-	return r.SendEnvelope(customActionToResponse(*action))
+	resp := customActionToResponse(*action)
+	resp.Config = maskConfigHeaders(resp.Config, canEdit)
+	return r.SendEnvelope(resp)
 }
 
 // CreateCustomAction creates a new custom action
@@ -166,8 +189,11 @@ func (a *App) CreateCustomAction(r *fastglue.Request) error {
 		Icon:           req.Icon,
 		ActionType:     req.ActionType,
 		Config:         models.JSONB(req.Config),
-		IsActive:       req.IsActive,
-		DisplayOrder:   req.DisplayOrder,
+		IsActive:       req.IsActive != nil && *req.IsActive,
+		DisplayOrder:   0,
+	}
+	if req.DisplayOrder != nil {
+		action.DisplayOrder = *req.DisplayOrder
 	}
 
 	if err := a.DB.Create(&action).Error; err != nil {
@@ -226,8 +252,14 @@ func (a *App) UpdateCustomAction(r *fastglue.Request) error {
 		configJSON, _ := json.Marshal(req.Config)
 		updates["config"] = configJSON
 	}
-	updates["is_active"] = req.IsActive
-	updates["display_order"] = req.DisplayOrder
+	// Only touch the flags that were sent: the list view toggles is_active
+	// alone, and writing a zero display_order for it scrambled the ordering.
+	if req.IsActive != nil {
+		updates["is_active"] = *req.IsActive
+	}
+	if req.DisplayOrder != nil {
+		updates["display_order"] = *req.DisplayOrder
+	}
 
 	if err := a.DB.Model(action).Updates(updates).Error; err != nil {
 		a.Log.Error("Failed to update custom action", "error", err)
@@ -473,12 +505,7 @@ func (a *App) executeURLAction(action models.CustomAction, context map[string]an
 	token := hex.EncodeToString(tokenBytes)
 
 	// Store the redirect token (expires in 30 seconds)
-	redirectTokenMutex.Lock()
-	redirectTokens[token] = redirectToken{
-		URL:       finalURL,
-		ExpiresAt: time.Now().Add(30 * time.Second),
-	}
-	redirectTokenMutex.Unlock()
+	storeRedirectToken(token, finalURL)
 
 	// Return the redirect URL
 	redirectURL := "/api/custom-actions/redirect/" + token
@@ -527,8 +554,17 @@ func (a *App) executeJavaScriptAction(action models.CustomAction, context map[st
 	// Wrap user code in an IIFE so return works
 	wrapped := fmt.Sprintf("(function(context, contact, user, organization) { %s })(context, contact, user, organization)", config.Code)
 
+	// A script that never returns (while(true){}, runaway recursion) would
+	// otherwise pin a CPU core for the life of the process and never answer
+	// the request. Interrupt it after a fixed budget.
+	timer := time.AfterFunc(jsActionTimeout, func() { vm.Interrupt("script timed out") })
 	val, err := vm.RunString(wrapped)
+	timer.Stop()
 	if err != nil {
+		var interrupted *goja.InterruptedError
+		if errors.As(err, &interrupted) {
+			return nil, fmt.Errorf("javascript execution error: script exceeded the %s time limit", jsActionTimeout)
+		}
 		return nil, fmt.Errorf("javascript execution error: %w", err)
 	}
 
@@ -555,12 +591,7 @@ func (a *App) executeJavaScriptAction(action models.CustomAction, context map[st
 				tokenBytes := make([]byte, 16)
 				_, _ = rand.Read(tokenBytes)
 				token := hex.EncodeToString(tokenBytes)
-				redirectTokenMutex.Lock()
-				redirectTokens[token] = redirectToken{
-					URL:       url,
-					ExpiresAt: time.Now().Add(30 * time.Second),
-				}
-				redirectTokenMutex.Unlock()
+				storeRedirectToken(token, url)
 				result.RedirectURL = "/api/custom-actions/redirect/" + token
 			}
 			if msg, ok := jsResult["message"].(string); ok {

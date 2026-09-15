@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/shridarpatil/whatomate/internal/config"
@@ -1122,4 +1125,78 @@ func TestReplaceTemplateContent_NoParams(t *testing.T) {
 	result := templateutil.ReplaceWithJSONBParams(bodyContent, content, params)
 
 	assert.Equal(t, "Hello, your order is ready!", result)
+}
+
+// Two workers holding a job for the same recipient (Start -> Pause -> Start
+// re-enqueues recipients whose first job is still queued) must result in one
+// send, not two.
+func TestWorker_HandleRecipientJob_ConcurrentJobsSendOnce(t *testing.T) {
+	w := testWorker(t)
+	if w.Redis == nil {
+		t.Skip("TEST_REDIS_URL not set")
+	}
+
+	var sends atomic.Int32
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		sends.Add(1)
+		<-release // hold the first send so the second job overlaps it
+		rw.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(rw).Encode(map[string]any{"messages": []map[string]any{{"id": "wamid.once-" + uuid.NewString()}}})
+	}))
+	defer server.Close()
+	w.WhatsApp = whatsapp.NewWithBaseURL(w.Log, server.URL)
+
+	org := testutil.CreateTestOrganization(t, w.DB)
+	user := testutil.CreateTestUser(t, w.DB, org.ID)
+	accountName := "once-acc-" + uuid.NewString()[:8]
+	testutil.CreateTestWhatsAppAccountWith(t, w.DB, org.ID, testutil.WithAccountName(accountName))
+	template := testutil.CreateTestTemplate(t, w.DB, org.ID, accountName)
+	campaign := &models.BulkMessageCampaign{
+		BaseModel:       models.BaseModel{ID: uuid.New()},
+		OrganizationID:  org.ID,
+		WhatsAppAccount: accountName,
+		Name:            "send once",
+		TemplateID:      template.ID,
+		Status:          models.CampaignStatusProcessing,
+		TotalRecipients: 1,
+		CreatedBy:       user.ID,
+	}
+	require.NoError(t, w.DB.Create(campaign).Error)
+	recipient := &models.BulkMessageRecipient{
+		BaseModel:   models.BaseModel{ID: uuid.New()},
+		CampaignID:  campaign.ID,
+		PhoneNumber: "1555" + uuid.NewString()[:7],
+		Status:      models.MessageStatusPending,
+	}
+	require.NoError(t, w.DB.Create(recipient).Error)
+
+	job := &queue.RecipientJob{
+		CampaignID:     campaign.ID,
+		OrganizationID: org.ID,
+		RecipientID:    recipient.ID,
+		PhoneNumber:    recipient.PhoneNumber,
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			assert.NoError(t, w.HandleRecipientJob(context.Background(), job))
+		}()
+	}
+	// Let both goroutines reach the lock / the held send before releasing.
+	time.Sleep(300 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	assert.Equal(t, int32(1), sends.Load(), "exactly one template must be sent per recipient")
+
+	var updated models.BulkMessageRecipient
+	require.NoError(t, w.DB.Where("id = ?", recipient.ID).First(&updated).Error)
+	assert.Equal(t, models.MessageStatusSent, updated.Status)
+	var updatedCampaign models.BulkMessageCampaign
+	require.NoError(t, w.DB.Where("id = ?", campaign.ID).First(&updatedCampaign).Error)
+	assert.Equal(t, 1, updatedCampaign.SentCount)
 }

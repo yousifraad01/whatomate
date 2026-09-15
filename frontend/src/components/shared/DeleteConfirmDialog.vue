@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -12,7 +13,7 @@ import { Button } from '@/components/ui/button'
 
 const open = defineModel<boolean>('open', { default: false })
 
-const props = withDefaults(defineProps<{
+withDefaults(defineProps<{
   title?: string
   itemName?: string
   description?: string
@@ -20,9 +21,6 @@ const props = withDefaults(defineProps<{
   cancelLabel?: string
   isSubmitting?: boolean
 }>(), {
-  title: 'Delete Item',
-  confirmLabel: 'Delete',
-  cancelLabel: 'Cancel',
   isSubmitting: false,
 })
 
@@ -30,6 +28,8 @@ const emit = defineEmits<{
   confirm: []
   cancel: []
 }>()
+
+const { t } = useI18n()
 
 function handleConfirm() {
   emit('confirm')
@@ -45,27 +45,23 @@ function handleCancel() {
   <AlertDialog v-model:open="open">
     <AlertDialogContent>
       <AlertDialogHeader>
-        <AlertDialogTitle>{{ title }}</AlertDialogTitle>
+        <AlertDialogTitle>{{ title || t('common.deleteItem') }}</AlertDialogTitle>
         <AlertDialogDescription>
           <slot name="description">
             <template v-if="description">{{ description }}</template>
-            <template v-else-if="itemName">
-              Are you sure you want to delete "{{ itemName }}"? This action cannot be undone.
-            </template>
-            <template v-else>
-              Are you sure you want to delete this item? This action cannot be undone.
-            </template>
+            <template v-else-if="itemName">{{ t('common.deleteConfirmNamed', { name: itemName }) }}</template>
+            <template v-else>{{ t('common.deleteConfirmGeneric') }}</template>
           </slot>
         </AlertDialogDescription>
       </AlertDialogHeader>
       <AlertDialogFooter>
-        <AlertDialogCancel :disabled="isSubmitting" @click="handleCancel">{{ cancelLabel }}</AlertDialogCancel>
+        <AlertDialogCancel :disabled="isSubmitting" @click="handleCancel">{{ cancelLabel || t('common.cancel') }}</AlertDialogCancel>
         <Button
           variant="destructive"
           :loading="isSubmitting"
           @click="handleConfirm"
         >
-          {{ confirmLabel }}
+          {{ confirmLabel || t('common.delete') }}
         </Button>
       </AlertDialogFooter>
     </AlertDialogContent>

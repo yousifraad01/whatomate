@@ -37,18 +37,31 @@ func TestApp_WaitForBackgroundTasks(t *testing.T) {
 			Log: testutil.NopLogger(),
 		}
 
-		done := make(chan struct{})
+		done := make(chan bool, 1)
 		go func() {
-			app.WaitForBackgroundTasks()
-			close(done)
+			done <- app.WaitForBackgroundTasks(5 * time.Second)
 		}()
 
 		select {
-		case <-done:
-			// Expected - should return immediately when no background tasks
+		case completed := <-done:
+			assert.True(t, completed, "no tasks were running, so the wait must not time out")
 		case <-time.After(time.Second):
 			t.Fatal("WaitForBackgroundTasks should return immediately when no tasks are running")
 		}
+	})
+
+	t.Run("reports a timeout while a task is still running", func(t *testing.T) {
+		t.Parallel()
+
+		app := &handlers.App{
+			Log: testutil.NopLogger(),
+		}
+		release := make(chan struct{})
+		app.SpawnForTest(func() { <-release })
+
+		assert.False(t, app.WaitForBackgroundTasks(50*time.Millisecond), "a blocked task must produce a timeout")
+		close(release)
+		assert.True(t, app.WaitForBackgroundTasks(time.Second), "the task must be observed once it finishes")
 	})
 }
 
@@ -92,7 +105,7 @@ func TestApp_DispatchWebhook_CompletesSuccessfully(t *testing.T) {
 	app.DispatchWebhook(org.ID, models.WebhookEventMessageIncoming, map[string]string{"test": "data"})
 
 	// Wait for background tasks
-	app.WaitForBackgroundTasks()
+	require.True(t, app.WaitForBackgroundTasks(10*time.Second), "dispatch must finish within the timeout")
 
 	// Verify webhook was called
 	assert.Equal(t, int32(1), requestCount.Load(), "webhook should have been called once")
@@ -155,7 +168,7 @@ func TestApp_DispatchWebhook_ConcurrencyLimit(t *testing.T) {
 	app.DispatchWebhook(org.ID, models.WebhookEventMessageIncoming, map[string]string{"test": "data"})
 
 	// Wait for all background tasks
-	app.WaitForBackgroundTasks()
+	app.WaitForBackgroundTasks(10 * time.Second)
 
 	// Verify concurrency was limited to 10
 	assert.LessOrEqual(t, maxConcurrent.Load(), int32(10), "max concurrent webhooks should be limited to 10")
@@ -185,7 +198,7 @@ func TestApp_DispatchWebhook_NoWebhooks(t *testing.T) {
 	// Wait should complete quickly
 	done := make(chan struct{})
 	go func() {
-		app.WaitForBackgroundTasks()
+		app.WaitForBackgroundTasks(10 * time.Second)
 		close(done)
 	}()
 
@@ -247,7 +260,7 @@ func TestApp_DispatchWebhook_InactiveWebhook(t *testing.T) {
 	clearWebhookCache(t, app.Redis, org.ID)
 
 	app.DispatchWebhook(org.ID, models.WebhookEventMessageIncoming, map[string]string{"test": "data"})
-	app.WaitForBackgroundTasks()
+	app.WaitForBackgroundTasks(10 * time.Second)
 
 	// Inactive webhook should not be called
 	assert.Equal(t, int32(0), requestCount.Load(), "inactive webhook should not be called")
@@ -290,7 +303,7 @@ func TestApp_DispatchWebhook_EventFiltering(t *testing.T) {
 
 	// Dispatch message.incoming event
 	app.DispatchWebhook(org.ID, models.WebhookEventMessageIncoming, map[string]string{"test": "data"})
-	app.WaitForBackgroundTasks()
+	app.WaitForBackgroundTasks(10 * time.Second)
 
 	// Webhook should not be called because it doesn't subscribe to message.incoming
 	assert.Equal(t, int32(0), requestCount.Load(), "webhook should not be called for non-subscribed events")
@@ -336,7 +349,7 @@ func TestApp_DispatchWebhook_RetryOnFailure(t *testing.T) {
 	require.NoError(t, app.DB.Create(webhook).Error)
 
 	app.DispatchWebhook(org.ID, models.WebhookEventMessageIncoming, map[string]string{"test": "data"})
-	app.WaitForBackgroundTasks()
+	app.WaitForBackgroundTasks(10 * time.Second)
 
 	// Should have retried (3 attempts total)
 	assert.Equal(t, int32(3), requestCount.Load(), "should retry on failure")
@@ -389,7 +402,7 @@ func TestApp_DispatchWebhook_HTTPTimeout(t *testing.T) {
 	// Wait with timeout (the HTTP client has 10s timeout, with 3 retries = ~30s max)
 	done := make(chan struct{})
 	go func() {
-		app.WaitForBackgroundTasks()
+		app.WaitForBackgroundTasks(10 * time.Second)
 		close(done)
 	}()
 
@@ -459,11 +472,11 @@ func TestApp_DispatchWebhook_MultipleEvents(t *testing.T) {
 
 	// Dispatch incoming event
 	app.DispatchWebhook(org.ID, models.WebhookEventMessageIncoming, map[string]string{"test": "incoming"})
-	app.WaitForBackgroundTasks()
+	app.WaitForBackgroundTasks(10 * time.Second)
 
 	// Dispatch outgoing event
 	app.DispatchWebhook(org.ID, models.WebhookEventMessageOutgoing, map[string]string{"test": "outgoing"})
-	app.WaitForBackgroundTasks()
+	app.WaitForBackgroundTasks(10 * time.Second)
 
 	// Verify each webhook was called for its event
 	assert.Equal(t, int32(1), incomingCount.Load(), "incoming webhook should be called once")

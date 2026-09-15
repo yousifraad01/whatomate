@@ -127,10 +127,7 @@ func (a *App) UpdateTag(r *fastglue.Request) error {
 
 	// Get tag name from path (URL-encoded)
 	tagNameEncoded := r.RequestCtx.UserValue("name").(string)
-	tagName, err := url.PathUnescape(tagNameEncoded)
-	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid tag name", nil, "")
-	}
+	tagName := decodeTagPathParam(tagNameEncoded)
 
 	var tag models.Tag
 	if err := a.DB.Where("organization_id = ? AND name = ?", orgID, tagName).First(&tag).Error; err != nil {
@@ -236,10 +233,7 @@ func (a *App) DeleteTag(r *fastglue.Request) error {
 
 	// Get tag name from path (URL-encoded)
 	tagNameEncoded := r.RequestCtx.UserValue("name").(string)
-	tagName, err := url.PathUnescape(tagNameEncoded)
-	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid tag name", nil, "")
-	}
+	tagName := decodeTagPathParam(tagNameEncoded)
 
 	var tag models.Tag
 	if err := a.DB.Where("organization_id = ? AND name = ?", orgID, tagName).First(&tag).Error; err != nil {
@@ -279,4 +273,15 @@ func tagToResponse(tag models.Tag) TagResponse {
 		CreatedAt: tag.CreatedAt.Format("2006-01-02T15:04:05Z"),
 		UpdatedAt: tag.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 	}
+}
+
+// decodeTagPathParam returns the tag name from the path parameter. fasthttp
+// already percent-decodes the path, so a name such as "50%" arrives decoded
+// and a second PathUnescape would fail on it; the unescape is only kept for
+// clients that double-encode, and its failure falls back to the raw value.
+func decodeTagPathParam(raw string) string {
+	if decoded, err := url.PathUnescape(raw); err == nil {
+		return decoded
+	}
+	return raw
 }

@@ -40,6 +40,18 @@ type RefreshRequest struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
+// dummyPasswordHash is a real bcrypt hash that failed logins for unknown
+// emails are compared against, so the response time does not reveal whether
+// an account exists. (A placeholder string is not a valid hash and bcrypt
+// rejects it immediately, which defeats the purpose.)
+var dummyPasswordHash = func() []byte {
+	h, err := bcrypt.GenerateFromPassword([]byte("whatomate-timing-equalizer"), bcrypt.DefaultCost)
+	if err != nil {
+		panic(err)
+	}
+	return h
+}()
+
 // Login authenticates a user and returns tokens
 func (a *App) Login(r *fastglue.Request) error {
 	var req LoginRequest
@@ -51,7 +63,7 @@ func (a *App) Login(r *fastglue.Request) error {
 	var user models.User
 	if err := a.DB.Preload("Role").Where("email = ?", req.Email).First(&user).Error; err != nil {
 		// Run dummy bcrypt to prevent timing-based account enumeration
-		_ = bcrypt.CompareHashAndPassword([]byte("$2a$10$xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"), []byte(req.Password))
+		_ = bcrypt.CompareHashAndPassword(dummyPasswordHash, []byte(req.Password))
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Invalid credentials", nil, "")
 	}
 
@@ -108,6 +120,10 @@ func (a *App) Login(r *fastglue.Request) error {
 
 // Register creates a new user in an existing organization
 func (a *App) Register(r *fastglue.Request) error {
+	if a.Config != nil && a.Config.App.DisableSelfRegistration {
+		return r.SendErrorEnvelope(fasthttp.StatusForbidden, "Self-registration is disabled. Ask your organization administrator for an account.", nil, "")
+	}
+
 	var req RegisterRequest
 	if err := a.decodeRequest(r, &req); err != nil {
 		return nil
@@ -277,29 +293,25 @@ func (a *App) RefreshToken(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Missing refresh token", nil, "")
 	}
 
-	// Parse and validate refresh token
-	token, err := jwt.ParseWithClaims(refreshTokenStr, &middleware.JWTClaims{}, func(token *jwt.Token) (any, error) {
-		return []byte(a.Config.JWT.Secret), nil
-	})
-
-	if err != nil || !token.Valid {
+	// Parse and validate refresh token (HS256 only, see middleware.ParseJWT)
+	claims, err := middleware.ParseJWT(refreshTokenStr, a.Config.JWT.Secret)
+	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Invalid refresh token", nil, "")
 	}
 
-	claims, ok := token.Claims.(*middleware.JWTClaims)
-	if !ok {
-		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Invalid token claims", nil, "")
+	// Refresh tokens always carry a JTI. A token without one is an access
+	// token (or a forgery) and must not be exchangeable for a new session.
+	if claims.ID == "" {
+		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Invalid refresh token", nil, "")
 	}
 
 	// Validate JTI in Redis (single-use: delete on consumption)
-	if claims.ID != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		deleted, err := a.Redis.Del(ctx, refreshTokenKey(claims.ID)).Result()
-		if err != nil || deleted == 0 {
-			// Token was already used or revoked
-			return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Refresh token has been revoked", nil, "")
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	deleted, err := a.Redis.Del(ctx, refreshTokenKey(claims.ID)).Result()
+	if err != nil || deleted == 0 {
+		// Token was already used or revoked
+		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Refresh token has been revoked", nil, "")
 	}
 
 	// Get user
@@ -514,16 +526,12 @@ func (a *App) Logout(r *fastglue.Request) error {
 	}
 
 	if refreshTokenStr != "" {
-		// Parse the token to extract JTI (don't need to fully validate — just extract claims)
-		token, _ := jwt.ParseWithClaims(refreshTokenStr, &middleware.JWTClaims{}, func(token *jwt.Token) (any, error) {
-			return []byte(a.Config.JWT.Secret), nil
-		})
-		if token != nil {
-			if claims, ok := token.Claims.(*middleware.JWTClaims); ok && claims.ID != "" {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				a.Redis.Del(ctx, refreshTokenKey(claims.ID))
-			}
+		// Parse the token to extract JTI (an expired token still yields its
+		// claims, which is all that is needed to revoke it)
+		if claims, _ := middleware.ParseJWT(refreshTokenStr, a.Config.JWT.Secret); claims != nil && claims.ID != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			a.Redis.Del(ctx, refreshTokenKey(claims.ID))
 		}
 	}
 

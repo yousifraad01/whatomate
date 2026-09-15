@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/zerodha/logf"
@@ -286,13 +288,21 @@ func (c *Client) DownloadMedia(ctx context.Context, mediaURL string, accessToken
 		return nil, fmt.Errorf("media download failed with status %d", resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	// Meta caps media at 100 MB (documents); anything larger is not a
+	// legitimate WhatsApp attachment and must not be buffered in memory.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, MaxMediaDownloadBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read media content: %w", err)
+	}
+	if int64(len(data)) > MaxMediaDownloadBytes {
+		return nil, fmt.Errorf("media download exceeds %d bytes", MaxMediaDownloadBytes)
 	}
 
 	return data, nil
 }
+
+// MaxMediaDownloadBytes bounds the size of a media file downloaded from Meta.
+const MaxMediaDownloadBytes int64 = 100 << 20
 
 // UploadMediaResponse represents the response from uploading media
 type UploadMediaResponse struct {
@@ -606,7 +616,8 @@ func (c *Client) ExchangeCodeForToken(ctx context.Context, code, appID, appSecre
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("token exchange request failed: %w", err)
+		// *url.Error embeds the full URL, which carries the app secret.
+		return "", fmt.Errorf("token exchange request failed: %w", redactURLError(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -780,4 +791,20 @@ func (c *Client) GetWABAPhoneNumbers(ctx context.Context, wabaID, accessToken st
 	}
 
 	return &resp, nil
+}
+
+// redactURLError strips the query string from the URL embedded in a
+// *url.Error so credentials passed as query parameters (OAuth client secret,
+// debug_token input) never reach the logs.
+func redactURLError(err error) error {
+	var uerr *url.Error
+	if !errors.As(err, &uerr) {
+		return err
+	}
+	if parsed, perr := url.Parse(uerr.URL); perr == nil {
+		parsed.RawQuery = ""
+		parsed.Fragment = ""
+		return &url.Error{Op: uerr.Op, URL: parsed.String(), Err: uerr.Err}
+	}
+	return &url.Error{Op: uerr.Op, URL: "<redacted>", Err: uerr.Err}
 }

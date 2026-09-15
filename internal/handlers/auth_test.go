@@ -263,6 +263,7 @@ func TestApp_RefreshToken_Success(t *testing.T) {
 	org := testutil.CreateTestOrganization(t, app.DB)
 	user := testutil.CreateTestUser(t, app.DB, org.ID, testutil.WithEmail(testutil.UniqueEmail("refresh")), testutil.WithPassword("password123"))
 	refreshToken := testutil.GenerateTestRefreshToken(t, user, testutil.TestJWTSecret, 7*24*time.Hour)
+	testutil.SeedRefreshToken(t, app.Redis, refreshToken, testutil.TestJWTSecret)
 
 	req := testutil.NewJSONRequest(t, map[string]string{
 		"refresh_token": refreshToken,
@@ -287,6 +288,24 @@ func TestApp_RefreshToken_Success(t *testing.T) {
 	// Tokens should be in cookies
 	assert.NotEmpty(t, testutil.GetResponseCookie(req, "whm_access"))
 	assert.NotEmpty(t, testutil.GetResponseCookie(req, "whm_refresh"))
+}
+
+func TestApp_RefreshToken_RejectsAccessToken(t *testing.T) {
+	app := newTestApp(t)
+	org := testutil.CreateTestOrganization(t, app.DB)
+	user := testutil.CreateTestUser(t, app.DB, org.ID, testutil.WithEmail(testutil.UniqueEmail("access-as-refresh")), testutil.WithPassword("password123"))
+
+	// Access tokens are signed with the same secret but carry no JTI. They
+	// must not be exchangeable for a fresh access+refresh pair, otherwise a
+	// leaked 15-minute access token becomes a long-lived session.
+	accessToken := testutil.GenerateTestAccessToken(t, user, testutil.TestJWTSecret, time.Hour)
+
+	req := testutil.NewJSONRequest(t, map[string]string{
+		"refresh_token": accessToken,
+	})
+
+	require.NoError(t, app.RefreshToken(req))
+	testutil.AssertErrorResponse(t, req, fasthttp.StatusUnauthorized, "Invalid refresh token")
 }
 
 func TestApp_RefreshToken_Expired(t *testing.T) {
@@ -329,6 +348,7 @@ func TestApp_RefreshToken_UserNotFound(t *testing.T) {
 		Email:          "fake@example.com",
 	}
 	token := testutil.GenerateTestRefreshToken(t, fakeUser, testutil.TestJWTSecret, 7*24*time.Hour)
+	testutil.SeedRefreshToken(t, app.Redis, token, testutil.TestJWTSecret)
 
 	req := testutil.NewJSONRequest(t, map[string]string{
 		"refresh_token": token,
@@ -344,6 +364,7 @@ func TestApp_RefreshToken_DisabledUser(t *testing.T) {
 	org := testutil.CreateTestOrganization(t, app.DB)
 	user := testutil.CreateTestUser(t, app.DB, org.ID, testutil.WithEmail(testutil.UniqueEmail("disabled")), testutil.WithPassword("password123"), testutil.WithInactive())
 	token := testutil.GenerateTestRefreshToken(t, user, testutil.TestJWTSecret, 7*24*time.Hour)
+	testutil.SeedRefreshToken(t, app.Redis, token, testutil.TestJWTSecret)
 
 	req := testutil.NewJSONRequest(t, map[string]string{
 		"refresh_token": token,

@@ -206,7 +206,7 @@ test.describe('Campaign Detail Page CRUD', () => {
       if (href && !href.includes('/new')) {
         await page.goto(href)
         await page.waitForLoadState('networkidle')
-        await expect(page.getByText('Recipients')).toBeVisible({ timeout: 10000 })
+        await expect(page.getByRole('heading', { name: /^Recipients/ })).toBeVisible({ timeout: 10000 })
       }
     }
   })

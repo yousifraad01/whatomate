@@ -39,8 +39,8 @@ export default defineConfig({
           'grid-layout': ['grid-layout-plus'],
           // Emoji picker (heavy)
           'emoji-picker': ['vue3-emoji-picker'],
-          // Form validation
-          'validation': ['vee-validate', '@vee-validate/zod', 'zod'],
+          // Flow editors (chatbot flow builder + IVR editor share one chunk)
+          'flow-editor': ['@vue-flow/core', '@vue-flow/background', '@vue-flow/controls', '@vue-flow/minimap'],
           // Utilities
           'utils': ['@vueuse/core', 'axios', 'clsx', 'tailwind-merge', 'class-variance-authority']
         }

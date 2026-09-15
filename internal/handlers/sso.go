@@ -240,9 +240,15 @@ func (a *App) CallbackSSO(r *fastglue.Request) error {
 		return nil
 	}
 
-	// Build OAuth config and exchange code for token
+	// Build OAuth config and exchange code for token. The exchange goes
+	// through the SSRF-guarded client: a custom provider's token_url is
+	// tenant-supplied and must not reach internal addresses.
 	oauthConfig := a.buildOAuthConfig(provider, &ssoConfig, r)
-	token, err := oauthConfig.Exchange(context.Background(), code)
+	exchangeCtx := context.Background()
+	if a.HTTPClient != nil {
+		exchangeCtx = context.WithValue(exchangeCtx, oauth2.HTTPClient, a.HTTPClient)
+	}
+	token, err := oauthConfig.Exchange(exchangeCtx, code)
 	if err != nil {
 		a.Log.Error("Failed to exchange OAuth code", "error", err, "provider", provider)
 		a.redirectWithError(r, "Failed to authenticate with provider")
@@ -333,6 +339,24 @@ func (a *App) CallbackSSO(r *fastglue.Request) error {
 
 		a.Log.Info("Created SSO user", "user_id", user.ID, "email", user.Email, "provider", provider)
 	} else {
+		// The provider configuration belongs to one organization; only
+		// accounts that are members of that organization may sign in through
+		// it, and the session is issued for that organization with the role
+		// the membership grants there. Without this an administrator of any
+		// tenant could point a "custom" provider at an identity provider under
+		// their control and obtain a session in a user's home tenant.
+		if user.OrganizationID != orgID {
+			var membership models.UserOrganization
+			if err := a.DB.Where("user_id = ? AND organization_id = ?", user.ID, orgID).First(&membership).Error; err != nil {
+				a.Log.Warn("SSO login refused: account is not a member of the provider's organization",
+					"user_id", user.ID, "org_id", orgID, "provider", provider)
+				a.redirectWithError(r, "Your account is not a member of this organization")
+				return nil
+			}
+			user.OrganizationID = orgID
+			user.RoleID = membership.RoleID
+		}
+
 		// User exists - update SSO info if not set
 		if user.SSOProvider == "" {
 			user.SSOProvider = provider
@@ -437,6 +461,16 @@ func (a *App) UpdateSSOProvider(r *fastglue.Request) error {
 	if provider == "custom" {
 		if req.AuthURL == "" || req.TokenURL == "" || req.UserInfoURL == "" {
 			return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Custom provider requires auth_url, token_url, and user_info_url", nil, "")
+		}
+		// The server itself calls token_url and user_info_url (with the client
+		// secret), so they must be public https endpoints.
+		for _, u := range []string{req.AuthURL, req.TokenURL, req.UserInfoURL} {
+			if err := validateWebhookURL(u); err != nil {
+				return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid provider URL: "+err.Error(), nil, "")
+			}
+			if !strings.HasPrefix(strings.ToLower(u), "https://") {
+				return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Provider URLs must use https", nil, "")
+			}
 		}
 	}
 
@@ -653,6 +687,16 @@ func (a *App) fetchUserInfo(provider string, ssoConfig *models.SSOProvider, toke
 
 	if userInfo.Email == "" {
 		return nil, fmt.Errorf("email not provided by SSO provider")
+	}
+
+	// Providers that report whether the address was verified (Google's
+	// verified_email, OIDC's email_verified) must not be trusted for an
+	// unverified one: the account would be matched by email to an existing
+	// user.
+	for _, key := range []string{"verified_email", "email_verified"} {
+		if v, ok := rawData[key].(bool); ok && !v {
+			return nil, fmt.Errorf("SSO provider reports the email address as unverified")
+		}
 	}
 
 	return &userInfo, nil

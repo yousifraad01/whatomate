@@ -262,11 +262,20 @@ func TestGetSLAEnabledSettingsCached_OnlySLAEnabledRows(t *testing.T) {
 		SLA: models.SLAConfig{Enabled: false},
 	}).Error)
 
+	// Client-inactivity reminders are an independent toggle and must be
+	// processed even when SLA tracking is off.
+	require.NoError(t, app.DB.Create(&models.ChatbotSettings{
+		BaseModel: models.BaseModel{ID: uuid.New()}, OrganizationID: orgB.ID,
+		WhatsAppAccount: "acc-B2", IsEnabled: true,
+		SLA:              models.SLAConfig{Enabled: false},
+		ClientInactivity: models.ClientInactivityConfig{ReminderEnabled: true, ReminderMinutes: 5},
+	}).Error)
+
 	got, err := app.getSLAEnabledSettingsCached()
 	require.NoError(t, err)
-	require.Len(t, got, 2, "only SLA-enabled rows must be returned, regardless of org")
+	require.Len(t, got, 3, "SLA-enabled or reminder-enabled rows must be returned, regardless of org")
 	for _, s := range got {
-		assert.True(t, s.SLA.Enabled)
+		assert.True(t, s.SLA.Enabled || s.ClientInactivity.ReminderEnabled)
 	}
 }
 
@@ -349,4 +358,34 @@ func TestInvalidateChatbotSettingsCache_DeletesAllAccountVariants(t *testing.T) 
 	exists, err := app.Redis.Exists(ctx, keyOther).Result()
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), exists, "other org's cache must not be invalidated")
+}
+
+// An inactive user must never be granted permissions, and the denial must not
+// be cached in a way that survives reactivation.
+func TestGetUserPermissionsCached_DeniesInactiveUser(t *testing.T) {
+	app := cacheTestApp(t)
+	org := testutil.CreateTestOrganization(t, app.DB)
+	role := testutil.CreateAgentRole(t, app.DB, org.ID)
+	user := testutil.CreateTestUser(t, app.DB, org.ID,
+		testutil.WithEmail(testutil.UniqueEmail("perm-inactive")),
+		testutil.WithRoleID(&role.ID),
+		testutil.WithInactive(),
+	)
+
+	_, err := app.getUserPermissionsCached(user.ID, org.ID)
+	require.ErrorIs(t, err, errUserInactive)
+	assert.False(t, app.HasPermission(user.ID, models.ResourceContacts, models.ActionRead, org.ID))
+	assert.False(t, app.IsSuperAdmin(user.ID))
+
+	// Nothing may have been cached for the inactive user.
+	ctx := context.Background()
+	n, err := app.Redis.Exists(ctx,
+		fmt.Sprintf("%s%s", userPermissionsCachePrefix, user.ID.String()),
+		fmt.Sprintf("%s%s:%s", userPermissionsCachePrefix, user.ID.String(), org.ID.String()),
+	).Result()
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), n)
+
+	require.NoError(t, app.DB.Model(&models.User{}).Where("id = ?", user.ID).Update("is_active", true).Error)
+	assert.True(t, app.HasPermission(user.ID, models.ResourceContacts, models.ActionRead, org.ID))
 }

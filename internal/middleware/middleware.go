@@ -2,7 +2,10 @@ package middleware
 
 import (
 	"context"
+	"crypto/sha256"
+	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -107,18 +110,52 @@ func SecurityHeaders() fastglue.FastMiddleware {
 	}
 }
 
-// Recovery recovers from panics
-func Recovery(log logf.Logger) fastglue.FastMiddleware {
-	return func(r *fastglue.Request) *fastglue.Request {
+// RecoverHandler wraps the root fasthttp handler so that a panic anywhere in
+// the middleware chain or a route handler is logged and answered with a 500
+// instead of terminating the process. fasthttp does not recover panics
+// itself, and a fastglue "before" middleware cannot recover a panic raised
+// after it has returned, so recovery has to live at the fasthttp level.
+func RecoverHandler(next fasthttp.RequestHandler, log logf.Logger) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
 		defer func() {
-			if err := recover(); err != nil {
-				log.Error("Panic recovered", "error", err, "path", string(r.RequestCtx.Path()))
-				r.RequestCtx.SetStatusCode(fasthttp.StatusInternalServerError)
-				r.RequestCtx.SetBodyString(`{"status":"error","message":"Internal server error"}`)
+			if rec := recover(); rec != nil {
+				log.Error("Panic recovered",
+					"error", rec,
+					"method", string(ctx.Method()),
+					"path", string(ctx.Path()),
+					"stack", string(debug.Stack()))
+				ctx.ResetBody()
+				ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+				ctx.SetContentType("application/json")
+				ctx.SetBodyString(`{"status":"error","message":"Internal server error"}`)
 			}
 		}()
-		return r
+		next(ctx)
 	}
+}
+
+// jwtParserOptions pins the accepted signing algorithm so a token whose header
+// names a different algorithm can never be validated against the HMAC secret.
+var jwtParserOptions = []jwt.ParserOption{
+	jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+}
+
+// ParseJWT parses and validates a token signed with the shared HMAC secret.
+// The returned claims are non-nil whenever the token could be decoded, even
+// when validation failed, so callers that only need the JTI (logout) can still
+// read it; err is nil only for a fully valid token.
+func ParseJWT(tokenString, secret string) (*JWTClaims, error) {
+	claims := &JWTClaims{}
+	token, err := jwt.ParseWithClaims(tokenString, claims, func(*jwt.Token) (any, error) {
+		return []byte(secret), nil
+	}, jwtParserOptions...)
+	if err != nil {
+		return claims, err
+	}
+	if !token.Valid {
+		return claims, jwt.ErrTokenInvalidClaims
+	}
+	return claims, nil
 }
 
 // Auth validates JWT tokens (legacy - use AuthWithDB for API key support)
@@ -163,19 +200,10 @@ func AuthWithDB(secret string, db *gorm.DB) fastglue.FastMiddleware {
 			return nil
 		}
 
-		// Parse and validate token
-		token, err := jwt.ParseWithClaims(tokenString, &JWTClaims{}, func(token *jwt.Token) (any, error) {
-			return []byte(secret), nil
-		})
-
-		if err != nil || !token.Valid {
+		// Parse and validate token (HS256 only)
+		claims, err := ParseJWT(tokenString, secret)
+		if err != nil {
 			_ = r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Invalid or expired token", nil, "")
-			return nil
-		}
-
-		claims, ok := token.Claims.(*JWTClaims)
-		if !ok {
-			_ = r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Invalid token claims", nil, "")
 			return nil
 		}
 
@@ -192,6 +220,54 @@ func AuthWithDB(secret string, db *gorm.DB) fastglue.FastMiddleware {
 	}
 }
 
+// apiKeyCacheTTL bounds how long a verified key may skip the bcrypt
+// comparison. The key row is still re-read on every request, so deactivation,
+// deletion and expiry take effect immediately; only the ~60 ms hash check is
+// skipped for keys that already proved themselves.
+const (
+	apiKeyCacheTTL     = 10 * time.Minute
+	apiKeyCacheMaxSize = 10000
+)
+
+type apiKeyCacheEntry struct {
+	id      uuid.UUID
+	expires time.Time
+}
+
+var (
+	apiKeyCacheMu sync.Mutex
+	apiKeyCache   = make(map[[32]byte]apiKeyCacheEntry)
+)
+
+func apiKeyCacheGet(digest [32]byte) (uuid.UUID, bool) {
+	apiKeyCacheMu.Lock()
+	defer apiKeyCacheMu.Unlock()
+	entry, ok := apiKeyCache[digest]
+	if !ok {
+		return uuid.Nil, false
+	}
+	if time.Now().After(entry.expires) {
+		delete(apiKeyCache, digest)
+		return uuid.Nil, false
+	}
+	return entry.id, true
+}
+
+func apiKeyCachePut(digest [32]byte, id uuid.UUID) {
+	apiKeyCacheMu.Lock()
+	defer apiKeyCacheMu.Unlock()
+	if len(apiKeyCache) >= apiKeyCacheMaxSize {
+		clear(apiKeyCache)
+	}
+	apiKeyCache[digest] = apiKeyCacheEntry{id: id, expires: time.Now().Add(apiKeyCacheTTL)}
+}
+
+func apiKeyCacheDelete(digest [32]byte) {
+	apiKeyCacheMu.Lock()
+	defer apiKeyCacheMu.Unlock()
+	delete(apiKeyCache, digest)
+}
+
 // validateAPIKey validates an API key and sets context values
 func validateAPIKey(r *fastglue.Request, key string, db *gorm.DB) bool {
 	// API key format: whm_<32 hex chars>
@@ -199,48 +275,71 @@ func validateAPIKey(r *fastglue.Request, key string, db *gorm.DB) bool {
 		return false
 	}
 
-	// Extract both new (16-char) and old (8-char) prefixes for backward compatibility.
-	// New keys store 16 chars; old keys store 8 chars. Query matches either.
-	newPrefix := key[4:20]
-	oldPrefix := key[4:12]
+	digest := sha256.Sum256([]byte(key))
 
-	// Find API keys with matching prefix (supports both old and new prefix lengths)
-	var apiKeys []models.APIKey
-	if err := db.Preload("User").Where("(key_prefix = ? OR key_prefix = ?) AND is_active = ?", newPrefix, oldPrefix, true).Find(&apiKeys).Error; err != nil {
-		return false
+	// Fast path: this exact key already passed bcrypt recently. Re-read the
+	// row so a deactivated or deleted key is refused straight away.
+	var matched *models.APIKey
+	if id, ok := apiKeyCacheGet(digest); ok {
+		var apiKey models.APIKey
+		if err := db.Preload("User").Where("id = ? AND is_active = ?", id, true).First(&apiKey).Error; err == nil {
+			matched = &apiKey
+		} else {
+			apiKeyCacheDelete(digest)
+		}
 	}
 
-	// Check each key with bcrypt
-	for _, apiKey := range apiKeys {
-		if err := bcrypt.CompareHashAndPassword([]byte(apiKey.KeyHash), []byte(key)); err == nil {
-			// Key matches - check expiration
-			if apiKey.ExpiresAt != nil && time.Now().After(*apiKey.ExpiresAt) {
-				return false // Key expired
-			}
+	if matched == nil {
+		// Extract both new (16-char) and old (8-char) prefixes for backward compatibility.
+		// New keys store 16 chars; old keys store 8 chars. Query matches either.
+		newPrefix := key[4:20]
+		oldPrefix := key[4:12]
 
-			// Update last used timestamp (async to not block request)
-			go func(id uuid.UUID) {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				now := time.Now()
-				db.WithContext(ctx).Model(&models.APIKey{}).Where("id = ?", id).Update("last_used_at", now)
-			}(apiKey.ID)
+		// Find API keys with matching prefix (supports both old and new prefix lengths)
+		var apiKeys []models.APIKey
+		if err := db.Preload("User").Where("(key_prefix = ? OR key_prefix = ?) AND is_active = ?", newPrefix, oldPrefix, true).Find(&apiKeys).Error; err != nil {
+			return false
+		}
 
-			// Set context values from the user who created the key
-			if apiKey.User != nil {
-				r.RequestCtx.SetUserValue(ContextKeyUserID, apiKey.UserID)
-				r.RequestCtx.SetUserValue(ContextKeyOrganizationID, apiKey.OrganizationID)
-				r.RequestCtx.SetUserValue(ContextKeyEmail, apiKey.User.Email)
-				if apiKey.User.RoleID != nil {
-					r.RequestCtx.SetUserValue(ContextKeyRoleID, *apiKey.User.RoleID)
-				}
-				r.RequestCtx.SetUserValue(ContextKeyIsSuperAdmin, apiKey.User.IsSuperAdmin)
-				return true
+		// Check each key with bcrypt
+		for i := range apiKeys {
+			if err := bcrypt.CompareHashAndPassword([]byte(apiKeys[i].KeyHash), []byte(key)); err == nil {
+				matched = &apiKeys[i]
+				apiKeyCachePut(digest, matched.ID)
+				break
 			}
 		}
 	}
 
-	return false
+	if matched == nil {
+		return false
+	}
+
+	// Key matches - check expiration
+	if matched.ExpiresAt != nil && time.Now().After(*matched.ExpiresAt) {
+		return false // Key expired
+	}
+
+	// Update last used timestamp (async to not block request)
+	go func(id uuid.UUID) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		now := time.Now()
+		db.WithContext(ctx).Model(&models.APIKey{}).Where("id = ?", id).Update("last_used_at", now)
+	}(matched.ID)
+
+	// Set context values from the user who created the key
+	if matched.User == nil {
+		return false
+	}
+	r.RequestCtx.SetUserValue(ContextKeyUserID, matched.UserID)
+	r.RequestCtx.SetUserValue(ContextKeyOrganizationID, matched.OrganizationID)
+	r.RequestCtx.SetUserValue(ContextKeyEmail, matched.User.Email)
+	if matched.User.RoleID != nil {
+		r.RequestCtx.SetUserValue(ContextKeyRoleID, *matched.User.RoleID)
+	}
+	r.RequestCtx.SetUserValue(ContextKeyIsSuperAdmin, matched.User.IsSuperAdmin)
+	return true
 }
 
 // OrganizationContext loads organization and user from database

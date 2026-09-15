@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import PageHeader from './PageHeader.vue'
 import ErrorState from './ErrorState.vue'
@@ -17,15 +18,16 @@ defineProps<{
   notFoundTitle?: string
   notFoundDescription?: string
 }>()
+
+const { t } = useI18n()
 </script>
 
 <template>
-  <div class="flex flex-col h-full">
+  <div class="flex h-full flex-col bg-background">
     <PageHeader
       :title="title"
       :description="description"
       :icon="icon"
-      :icon-gradient="iconGradient"
       :back-link="backLink"
       :breadcrumbs="breadcrumbs"
     >
@@ -35,23 +37,24 @@ defineProps<{
     </PageHeader>
 
     <!-- Loading -->
-    <div v-if="isLoading" class="flex-1 flex items-center justify-center">
-      <Loader2 class="h-8 w-8 animate-spin text-muted-foreground" />
+    <div v-if="isLoading" class="flex flex-1 items-center justify-center" role="status" aria-live="polite">
+      <Loader2 class="h-8 w-8 animate-spin text-muted-foreground" aria-hidden="true" />
+      <span class="sr-only">{{ t('common.loading') }}</span>
     </div>
 
     <!-- Not found -->
     <ErrorState
       v-else-if="isNotFound"
-      :title="notFoundTitle || 'Not found'"
-      :description="notFoundDescription || 'The resource you are looking for does not exist.'"
+      :title="notFoundTitle || t('common.notFoundTitle')"
+      :description="notFoundDescription || t('common.notFoundDesc')"
       class="flex-1"
     />
 
     <!-- Content -->
     <ScrollArea v-else class="flex-1">
-      <div class="p-6">
-        <div class="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div class="lg:col-span-2 space-y-6">
+      <div class="p-4 sm:p-6">
+        <div class="mx-auto grid max-w-6xl grid-cols-1 gap-6 lg:grid-cols-3">
+          <div class="space-y-6 lg:col-span-2">
             <slot />
           </div>
           <div class="space-y-6">

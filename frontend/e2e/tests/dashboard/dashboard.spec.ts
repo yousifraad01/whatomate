@@ -10,7 +10,7 @@ test.describe('Dashboard', () => {
 
   test('should display dashboard page', async ({ page }) => {
     await expect(page.locator('h1')).toContainText('Dashboard')
-    await expect(page.getByText('Customizable analytics overview')).toBeVisible()
+    await expect(page.getByText(/Reporting period/)).toBeVisible()
   })
 
   test('should display stat cards', async ({ page }) => {
@@ -53,30 +53,30 @@ test.describe('Dashboard', () => {
     await expect(main.getByText('Common tasks and shortcuts')).toBeVisible()
 
     // Check for quick action links - scope to main to avoid sidebar duplicates
-    await expect(main.locator('a[href="/chat"]')).toBeVisible()
-    await expect(main.locator('a[href="/campaigns"]')).toBeVisible()
-    await expect(main.locator('a[href="/templates"]')).toBeVisible()
-    await expect(main.locator('a[href="/chatbot"]')).toBeVisible()
+    await expect(main.locator('nav a[href="/chat"]')).toBeVisible()
+    await expect(main.locator('nav a[href="/campaigns"]')).toBeVisible()
+    await expect(main.locator('nav a[href="/templates"]')).toBeVisible()
+    await expect(main.locator('nav a[href="/chatbot"]')).toBeVisible()
   })
 
   test('should navigate to chat from quick actions', async ({ page }) => {
     // Use main to scope to quick actions, not sidebar
-    await page.locator('main a[href="/chat"]').click()
+    await page.locator('main nav a[href="/chat"]').click()
     await expect(page).toHaveURL(/\/chat/)
   })
 
   test('should navigate to campaigns from quick actions', async ({ page }) => {
-    await page.locator('main a[href="/campaigns"]').click()
+    await page.locator('main nav a[href="/campaigns"]').click()
     await expect(page).toHaveURL(/\/campaigns/)
   })
 
   test('should navigate to templates from quick actions', async ({ page }) => {
-    await page.locator('main a[href="/templates"]').click()
+    await page.locator('main nav a[href="/templates"]').click()
     await expect(page).toHaveURL(/\/templates/)
   })
 
   test('should navigate to chatbot from quick actions', async ({ page }) => {
-    await page.locator('main a[href="/chatbot"]').click()
+    await page.locator('main nav a[href="/chatbot"]').click()
     await expect(page).toHaveURL(/\/chatbot/)
   })
 

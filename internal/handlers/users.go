@@ -86,7 +86,7 @@ type ChangePasswordRequest struct {
 
 // ListUsers returns all users for the organization
 func (a *App) ListUsers(r *fastglue.Request) error {
-	orgID, _, err := a.requireAuth(r, models.ResourceUsers, models.ActionRead)
+	orgID, currentUserID, err := a.requireAuth(r, models.ResourceUsers, models.ActionRead)
 	if err != nil {
 		return nil
 	}
@@ -176,6 +176,11 @@ func (a *App) ListUsers(r *fastglue.Request) error {
 		}
 		resp := userToResponse(user)
 		resp.IsMember = homeOrgMap[user.ID] != orgID
+		// Personal settings (notification preferences) are only the user's own
+		// business; colleagues get the profile without them.
+		if user.ID != currentUserID {
+			resp.Settings = nil
+		}
 		response[i] = resp
 	}
 
@@ -431,6 +436,12 @@ func (a *App) UpdateUser(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusForbidden, "Insufficient permissions to change roles", nil, "")
 	}
 
+	// Nobody but a super admin may change their own role: users:write would
+	// otherwise be enough to promote oneself to admin.
+	if req.RoleID != nil && currentUserID == id && (user.RoleID == nil || *user.RoleID != *req.RoleID) && !a.IsSuperAdmin(currentUserID) {
+		return r.SendErrorEnvelope(fasthttp.StatusForbidden, "Cannot change your own role", nil, "")
+	}
+
 	// For cross-org members, only allow role updates
 	if isMember {
 		if req.RoleID == nil {
@@ -504,11 +515,13 @@ func (a *App) UpdateUser(r *fastglue.Request) error {
 		user.Role = nil // Clear the preloaded role to prevent GORM from using the old association
 	}
 
+	activeChanged := false
 	if req.IsActive != nil {
 		// Prevent user from deactivating themselves
 		if currentUserID == id && !*req.IsActive {
 			return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Cannot deactivate yourself", nil, "")
 		}
+		activeChanged = user.IsActive != *req.IsActive
 		user.IsActive = *req.IsActive
 	}
 
@@ -529,12 +542,16 @@ func (a *App) UpdateUser(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to update user", nil, "")
 	}
 
-	// Invalidate permissions cache if role changed
 	if roleChanged {
 		// Sync role change to UserOrganization for this org
 		a.DB.Model(&models.UserOrganization{}).
 			Where("user_id = ? AND organization_id = ?", user.ID, orgID).
 			Update("role_id", user.RoleID)
+	}
+	// Invalidate the permissions cache when the role or the active flag
+	// changed; a cached grant would otherwise let a deactivated user keep
+	// working until the cache entry (6 h) or their access token expired.
+	if roleChanged || activeChanged {
 		a.InvalidateUserPermissionsCache(user.ID)
 	}
 

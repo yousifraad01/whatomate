@@ -2,6 +2,7 @@ package handlers_test
 
 import (
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -505,6 +506,52 @@ func TestApp_StartCampaign_Success(t *testing.T) {
 	app.DB.Where("id = ?", campaign.ID).First(&updated)
 	assert.Equal(t, models.CampaignStatusProcessing, updated.Status)
 	assert.NotNil(t, updated.StartedAt)
+}
+
+func TestApp_StartCampaign_ConcurrentStartsEnqueueOnce(t *testing.T) {
+	mockQueue := testutil.NewMockQueue()
+	app := newTestApp(t, withQueue(mockQueue))
+	org := testutil.CreateTestOrganization(t, app.DB)
+	user := testutil.CreateTestUser(t, app.DB, org.ID, testutil.WithEmail(testutil.UniqueEmail("start-race")), testutil.WithPassword("password"))
+	account := testutil.CreateTestWhatsAppAccountWith(t, app.DB, org.ID, testutil.WithAccountName("start-race-account"))
+	template := testutil.CreateTestTemplate(t, app.DB, org.ID, account.Name)
+	campaign := createTestCampaign(t, app, org.ID, template.ID, user.ID, account.Name, models.CampaignStatusDraft)
+	createTestRecipient(t, app, campaign.ID, "+1234567890", models.MessageStatusPending)
+	createTestRecipient(t, app, campaign.ID, "+0987654321", models.MessageStatusPending)
+
+	// Fire several start requests at once (double-click / client retry). The
+	// status transition is a conditional UPDATE, so exactly one request may
+	// enqueue the recipients regardless of how the goroutines interleave.
+	const attempts = 6
+	statuses := make([]int, attempts)
+	var wg sync.WaitGroup
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			req := testutil.NewJSONRequest(t, nil)
+			testutil.SetAuthContext(req, org.ID, user.ID)
+			testutil.SetPathParam(req, "id", campaign.ID.String())
+			require.NoError(t, app.StartCampaign(req))
+			statuses[i] = testutil.GetResponseStatusCode(req)
+		}(i)
+	}
+	wg.Wait()
+
+	okCount := 0
+	for _, s := range statuses {
+		switch s {
+		case fasthttp.StatusOK:
+			okCount++
+		case fasthttp.StatusBadRequest, fasthttp.StatusConflict:
+			// lost the race: either the in-handler status check or the
+			// conditional update refused it
+		default:
+			t.Fatalf("unexpected status %d", s)
+		}
+	}
+	assert.Equal(t, 1, okCount, "exactly one start must succeed")
+	assert.Equal(t, 2, mockQueue.JobCount(), "recipients must be enqueued exactly once")
 }
 
 func TestApp_StartCampaign_NoPendingRecipients(t *testing.T) {

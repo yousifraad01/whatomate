@@ -181,6 +181,37 @@ func TestApp_WebhookHandler_NoSignatureNoAppSecret_Accepted(t *testing.T) {
 	assert.Equal(t, fasthttp.StatusOK, testutil.GetResponseStatusCode(req))
 }
 
+func TestApp_WebhookHandler_NoSignatureWithAppSecret_Rejected(t *testing.T) {
+	// When the matching account has an AppSecret, a request without an
+	// X-Hub-Signature-256 header cannot have come from Meta and must be
+	// rejected before any event is processed.
+	app := newAppForWebhook(t, "")
+	org := testutil.CreateTestOrganization(t, app.DB)
+	acc := &models.WhatsAppAccount{
+		BaseModel:          models.BaseModel{ID: uuid.New()},
+		OrganizationID:     org.ID,
+		Name:               "wbk-h-unsigned",
+		PhoneID:            "phone-unsigned-" + uuid.New().String()[:8],
+		BusinessID:         "biz-unsigned",
+		AccessToken:        "tok",
+		AppSecret:          "shhh-app-secret-32-bytes-long-xx",
+		WebhookVerifyToken: "vt",
+		APIVersion:         "v18.0",
+		Status:             "active",
+	}
+	require.NoError(t, app.DB.Create(acc).Error)
+
+	body := makeMessagesPayload(acc.PhoneID)
+	req := testutil.NewRequest(t)
+	req.RequestCtx.Request.Header.SetMethod("POST")
+	req.RequestCtx.Request.Header.SetContentType("application/json")
+	req.RequestCtx.Request.SetBody(body)
+
+	require.NoError(t, app.WebhookHandler(req))
+	assert.Equal(t, fasthttp.StatusForbidden, testutil.GetResponseStatusCode(req),
+		"unsigned webhook must be rejected when the account has an app secret")
+}
+
 func TestApp_WebhookHandler_ValidSignature_Accepted(t *testing.T) {
 	app := newAppForWebhook(t, "")
 	org := testutil.CreateTestOrganization(t, app.DB)
@@ -301,4 +332,124 @@ func TestApp_WebhookHandler_EmptyEntryAccepted(t *testing.T) {
 
 	require.NoError(t, app.WebhookHandler(req))
 	assert.Equal(t, fasthttp.StatusOK, testutil.GetResponseStatusCode(req))
+}
+
+// newWebhookAccount inserts a WhatsApp account with the given phone id, WABA id
+// and app secret for signature tests.
+func newWebhookAccount(t *testing.T, app *handlers.App, orgID uuid.UUID, name, phoneID, wabaID, appSecret string) *models.WhatsAppAccount {
+	t.Helper()
+	acc := &models.WhatsAppAccount{
+		BaseModel:          models.BaseModel{ID: uuid.New()},
+		OrganizationID:     orgID,
+		Name:               name,
+		PhoneID:            phoneID,
+		BusinessID:         wabaID,
+		AccessToken:        "tok",
+		AppSecret:          appSecret,
+		WebhookVerifyToken: "vt",
+		APIVersion:         "v18.0",
+		Status:             "active",
+	}
+	require.NoError(t, app.DB.Create(acc).Error)
+	return acc
+}
+
+func postWebhook(t *testing.T, app *handlers.App, body []byte, signature string) int {
+	t.Helper()
+	req := testutil.NewRequest(t)
+	req.RequestCtx.Request.Header.SetMethod("POST")
+	req.RequestCtx.Request.Header.SetContentType("application/json")
+	if signature != "" {
+		req.RequestCtx.Request.Header.Set("X-Hub-Signature-256", signature)
+	}
+	req.RequestCtx.Request.SetBody(body)
+	require.NoError(t, app.WebhookHandler(req))
+	return testutil.GetResponseStatusCode(req)
+}
+
+// A payload that references two accounts protected by different app secrets
+// must be refused even when it is correctly signed with one of them: the
+// signature proves knowledge of one tenant's secret only, and accepting the
+// body would let that tenant inject events for the other.
+func TestApp_WebhookHandler_MixedAppSecretsRejected(t *testing.T) {
+	app := newAppForWebhook(t, "")
+	orgA := testutil.CreateTestOrganization(t, app.DB)
+	orgB := testutil.CreateTestOrganization(t, app.DB)
+	suffix := uuid.New().String()[:8]
+	secretA := "secret-A-" + suffix
+	secretB := "secret-B-" + suffix
+	accA := newWebhookAccount(t, app, orgA.ID, "wbk-mixed-a-"+suffix, "phone-mixed-a-"+suffix, "waba-a-"+suffix, secretA)
+	accB := newWebhookAccount(t, app, orgB.ID, "wbk-mixed-b-"+suffix, "phone-mixed-b-"+suffix, "waba-b-"+suffix, secretB)
+
+	body, _ := json.Marshal(map[string]any{
+		"object": "whatsapp_business_account",
+		"entry": []map[string]any{{
+			"id": accA.BusinessID,
+			"changes": []map[string]any{
+				{"field": "messages", "value": map[string]any{"messaging_product": "whatsapp",
+					"metadata": map[string]any{"phone_number_id": accA.PhoneID}}},
+				{"field": "messages", "value": map[string]any{"messaging_product": "whatsapp",
+					"metadata": map[string]any{"phone_number_id": accB.PhoneID}}},
+			},
+		}},
+	})
+
+	assert.Equal(t, fasthttp.StatusForbidden, postWebhook(t, app, body, signWebhook(body, secretA)),
+		"signature from tenant A must not authenticate events addressed to tenant B")
+	assert.Equal(t, fasthttp.StatusForbidden, postWebhook(t, app, body, signWebhook(body, secretB)))
+
+	// The same two accounts under one secret are fine.
+	require.NoError(t, app.DB.Model(accB).Update("app_secret", secretA).Error)
+	app.InvalidateWhatsAppAccountCache(accB.PhoneID)
+	assert.Equal(t, fasthttp.StatusOK, postWebhook(t, app, body, signWebhook(body, secretA)))
+}
+
+// WABA-level events (template status updates) carry no phone_number_id. They
+// must still be verified against the secret of the accounts registered under
+// that WABA instead of being accepted unsigned.
+func TestApp_WebhookHandler_TemplateStatusUpdateRequiresSignature(t *testing.T) {
+	app := newAppForWebhook(t, "")
+	org := testutil.CreateTestOrganization(t, app.DB)
+	suffix := uuid.New().String()[:8]
+	secret := "waba-secret-" + suffix
+	acc := newWebhookAccount(t, app, org.ID, "wbk-tpl-"+suffix, "phone-tpl-"+suffix, "waba-tpl-"+suffix, secret)
+
+	body, _ := json.Marshal(map[string]any{
+		"object": "whatsapp_business_account",
+		"entry": []map[string]any{{
+			"id": acc.BusinessID,
+			"changes": []map[string]any{{
+				"field": "message_template_status_update",
+				"value": map[string]any{
+					"event":                     "DISABLED",
+					"message_template_name":     "order_update",
+					"message_template_language": "en",
+				},
+			}},
+		}},
+	})
+
+	assert.Equal(t, fasthttp.StatusForbidden, postWebhook(t, app, body, ""),
+		"unsigned template status update must be rejected when the WABA's account has a secret")
+	assert.Equal(t, fasthttp.StatusForbidden, postWebhook(t, app, body, signWebhook(body, "wrong-secret")))
+	assert.Equal(t, fasthttp.StatusOK, postWebhook(t, app, body, signWebhook(body, secret)))
+}
+
+// When no referenced account has a secret, the global whatsapp.app_secret
+// from the config protects the endpoint.
+func TestApp_WebhookHandler_ConfigAppSecretFallback(t *testing.T) {
+	app := newAppForWebhook(t, "")
+	app.Config.WhatsApp.AppSecret = "global-app-secret-" + uuid.New().String()[:8]
+	org := testutil.CreateTestOrganization(t, app.DB)
+	suffix := uuid.New().String()[:8]
+	acc := newWebhookAccount(t, app, org.ID, "wbk-cfg-"+suffix, "phone-cfg-"+suffix, "waba-cfg-"+suffix, "")
+
+	body := makeMessagesPayload(acc.PhoneID)
+	assert.Equal(t, fasthttp.StatusForbidden, postWebhook(t, app, body, ""))
+	assert.Equal(t, fasthttp.StatusForbidden, postWebhook(t, app, body, signWebhook(body, "not-it")))
+	assert.Equal(t, fasthttp.StatusOK, postWebhook(t, app, body, signWebhook(body, app.Config.WhatsApp.AppSecret)))
+
+	// An unknown phone id with no config secret stays accepted (legacy behaviour).
+	app.Config.WhatsApp.AppSecret = ""
+	assert.Equal(t, fasthttp.StatusOK, postWebhook(t, app, makeMessagesPayload("phone-unknown-"+suffix), ""))
 }

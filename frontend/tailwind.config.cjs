@@ -60,6 +60,39 @@ module.exports = {
   				DEFAULT: 'hsl(var(--card))',
   				foreground: 'hsl(var(--card-foreground))'
   			},
+  			// Application shell
+  			sidebar: {
+  				DEFAULT: 'hsl(var(--sidebar))',
+  				foreground: 'hsl(var(--sidebar-foreground))',
+  				muted: 'hsl(var(--sidebar-muted))',
+  				accent: 'hsl(var(--sidebar-accent))',
+  				border: 'hsl(var(--sidebar-border))'
+  			},
+  			// Semantic status colours: `bg-success text-success-foreground`
+  			success: {
+  				DEFAULT: 'hsl(var(--success))',
+  				foreground: 'hsl(var(--success-foreground))'
+  			},
+  			warning: {
+  				DEFAULT: 'hsl(var(--warning))',
+  				foreground: 'hsl(var(--warning-foreground))'
+  			},
+  			info: {
+  				DEFAULT: 'hsl(var(--info))',
+  				foreground: 'hsl(var(--info-foreground))'
+  			},
+  			danger: {
+  				DEFAULT: 'hsl(var(--danger))',
+  				foreground: 'hsl(var(--danger-foreground))'
+  			},
+  			chart: {
+  				1: 'hsl(var(--chart-1))',
+  				2: 'hsl(var(--chart-2))',
+  				3: 'hsl(var(--chart-3))',
+  				4: 'hsl(var(--chart-4))',
+  				5: 'hsl(var(--chart-5))',
+  				6: 'hsl(var(--chart-6))'
+  			},
   			whatsapp: {
   				green: '#25D366',
   				teal: '#128C7E',

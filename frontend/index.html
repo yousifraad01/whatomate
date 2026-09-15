@@ -7,10 +7,13 @@
     <meta name="description" content="Whatomate - WhatsApp Business Platform">
     <title>Whatomate</title>
     <script>
+      // Apply the theme class before the app mounts so light-mode users do
+      // not see a flash of the dark-first stylesheet. Mirrors useColorMode.
       (function() {
-        var mode = localStorage.getItem('color-mode');
+        var mode;
+        try { mode = localStorage.getItem('color-mode'); } catch (e) { mode = null; }
         var isDark = mode === 'dark' || (mode === 'system' || !mode) && window.matchMedia('(prefers-color-scheme: dark)').matches;
-        if (isDark) document.documentElement.classList.add('dark');
+        document.documentElement.classList.add(isDark ? 'dark' : 'light');
       })();
     </script>
   </head>

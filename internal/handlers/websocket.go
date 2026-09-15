@@ -57,17 +57,16 @@ func (a *App) WebSocketHandler(r *fastglue.Request) error {
 // and returns user ID and organization ID.
 func (a *App) validateWSTokenFn() ws.AuthenticateFn {
 	return func(tokenString string) (uuid.UUID, uuid.UUID, error) {
-		token, err := jwt.ParseWithClaims(tokenString, &middleware.JWTClaims{}, func(token *jwt.Token) (any, error) {
-			return []byte(a.Config.JWT.Secret), nil
-		})
-
-		if err != nil || !token.Valid {
+		claims, err := middleware.ParseJWT(tokenString, a.Config.JWT.Secret)
+		if err != nil {
 			return uuid.Nil, uuid.Nil, err
 		}
 
-		claims, ok := token.Claims.(*middleware.JWTClaims)
-		if !ok {
-			return uuid.Nil, uuid.Nil, jwt.ErrTokenInvalidClaims
+		// Only the short-lived token minted by GetWSToken may open a socket.
+		// Access and refresh tokens are signed with the same secret but carry
+		// a different subject, so they are refused here.
+		if claims.Subject != "ws" {
+			return uuid.Nil, uuid.Nil, jwt.ErrTokenInvalidSubject
 		}
 
 		return claims.UserID, claims.OrganizationID, nil

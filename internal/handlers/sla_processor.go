@@ -90,7 +90,10 @@ func (p *SLAProcessor) processOrganizationSLA(settings models.ChatbotSettings, n
 		p.markSLABreached(orgID, now)
 	}
 
-	// 4. Handle client inactivity (reminders and auto-close)
+	// 4. Handle client inactivity (reminders and auto-close). The toggle is
+	// independent of sla_enabled: getSLAEnabledSettingsCached selects rows
+	// with either switch on, so reminders run for organizations that never
+	// enabled SLA tracking.
 	if settings.ClientInactivity.ReminderEnabled {
 		p.processClientInactivity(orgID, settings, now)
 	}
@@ -493,7 +496,7 @@ func (p *SLAProcessor) processClientInactivity(orgID uuid.UUID, settings models.
 		}
 
 		// Check if we should send reminder
-		if settings.ClientInactivity.ReminderMinutes > 0 && !contact.ChatbotReminderSent {
+		if settings.ClientInactivity.ReminderEnabled && settings.ClientInactivity.ReminderMinutes > 0 && !contact.ChatbotReminderSent {
 			reminderThreshold := time.Duration(settings.ClientInactivity.ReminderMinutes) * time.Minute
 			if timeSinceChatbotMsg >= reminderThreshold {
 				p.sendChatbotReminder(contact, settings)

@@ -417,7 +417,8 @@ export const chatbotService = {
     notes?: string
     source?: string
   }) => api.post('/chatbot/transfers', data),
-  pickNextTransfer: () => api.post('/chatbot/transfers/pick'),
+  pickNextTransfer: (teamId?: string) =>
+    api.post('/chatbot/transfers/pick', undefined, { params: teamId ? { team_id: teamId } : undefined }),
   resumeTransfer: (id: string) => api.put(`/chatbot/transfers/${id}/resume`),
   assignTransfer: (id: string, agentId: string | null, teamId?: string | null) =>
     api.put(`/chatbot/transfers/${id}/assign`, { agent_id: agentId, team_id: teamId })

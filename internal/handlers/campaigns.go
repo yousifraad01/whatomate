@@ -308,10 +308,17 @@ func (a *App) UpdateCampaign(r *fastglue.Request) error {
 		if err != nil {
 			return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid template ID", nil, "")
 		}
+		// Same check as CreateCampaign: the template must belong to this org.
+		if _, err := findByIDAndOrg[models.Template](a.DB, r, templateID, orgID, "Template"); err != nil {
+			return nil
+		}
 		updates["template_id"] = templateID
 	}
 
 	if req.WhatsAppAccount != "" {
+		if _, err := a.resolveWhatsAppAccount(orgID, req.WhatsAppAccount); err != nil {
+			return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "WhatsApp account not found", nil, "")
+		}
 		updates["whats_app_account"] = req.WhatsAppAccount
 	}
 
@@ -449,9 +456,18 @@ func (a *App) StartCampaign(r *fastglue.Request) error {
 		"started_at": now,
 	}
 
-	if err := a.DB.Model(campaign).Updates(updates).Error; err != nil {
-		a.Log.Error("Failed to start campaign", "error", err)
+	// Conditional on the status read above so two concurrent start requests
+	// (double-click, client retry) cannot both enqueue the recipients.
+	result := a.DB.Model(&models.BulkMessageCampaign{}).
+		Where("id = ? AND organization_id = ? AND status IN ?", id, orgID,
+			[]models.CampaignStatus{models.CampaignStatusDraft, models.CampaignStatusScheduled, models.CampaignStatusPaused}).
+		Updates(updates)
+	if result.Error != nil {
+		a.Log.Error("Failed to start campaign", "error", result.Error)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to start campaign", nil, "")
+	}
+	if result.RowsAffected == 0 {
+		return r.SendErrorEnvelope(fasthttp.StatusConflict, "Campaign is already being started", nil, "")
 	}
 
 	a.Log.Info("Campaign started", "campaign_id", id, "recipients", len(recipients))
@@ -610,10 +626,18 @@ func (a *App) RetryFailed(r *fastglue.Request) error {
 	// Recalculate campaign stats from messages table
 	a.recalculateCampaignStats(id)
 
-	// Update campaign status to processing
-	if err := a.DB.Model(campaign).Update("status", models.CampaignStatusProcessing).Error; err != nil {
-		a.Log.Error("Failed to update campaign status", "error", err)
+	// Update campaign status to processing, conditional on the status read
+	// above so a concurrent retry cannot enqueue the same recipients twice.
+	result := a.DB.Model(&models.BulkMessageCampaign{}).
+		Where("id = ? AND organization_id = ? AND status IN ?", id, orgID,
+			[]models.CampaignStatus{models.CampaignStatusCompleted, models.CampaignStatusPaused, models.CampaignStatusFailed}).
+		Update("status", models.CampaignStatusProcessing)
+	if result.Error != nil {
+		a.Log.Error("Failed to update campaign status", "error", result.Error)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to update campaign", nil, "")
+	}
+	if result.RowsAffected == 0 {
+		return r.SendErrorEnvelope(fasthttp.StatusConflict, "Campaign retry is already in progress", nil, "")
 	}
 
 	a.Log.Info("Retrying failed messages", "campaign_id", id, "failed_count", len(failedRecipients))
@@ -673,18 +697,45 @@ func (a *App) ImportRecipients(r *fastglue.Request) error {
 	if err := a.decodeRequest(r, &req); err != nil {
 		return nil
 	}
+	if len(req.Recipients) == 0 {
+		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "At least one recipient is required", nil, "")
+	}
+	if len(req.Recipients) > maxRecipientsPerImport {
+		return r.SendErrorEnvelope(fasthttp.StatusBadRequest,
+			fmt.Sprintf("Too many recipients in one request (max %d); split the import", maxRecipientsPerImport), nil, "")
+	}
 
-	// Create recipients
-	recipients := make([]models.BulkMessageRecipient, len(req.Recipients))
-	for i, rec := range req.Recipients {
-		recipients[i] = models.BulkMessageRecipient{
+	// Recipients already on the campaign must not be added again: every
+	// duplicate row would be a second message to the same customer.
+	var existingPhones []string
+	a.DB.Model(&models.BulkMessageRecipient{}).Where("campaign_id = ?", id).Pluck("phone_number", &existingPhones)
+	seen := make(map[string]struct{}, len(existingPhones)+len(req.Recipients))
+	for _, p := range existingPhones {
+		seen[strings.TrimSpace(p)] = struct{}{}
+	}
+
+	// Create recipients (blank numbers and duplicates within the request are skipped)
+	recipients := make([]models.BulkMessageRecipient, 0, len(req.Recipients))
+	for _, rec := range req.Recipients {
+		phone := strings.TrimSpace(rec.PhoneNumber)
+		if phone == "" {
+			continue
+		}
+		if _, dup := seen[phone]; dup {
+			continue
+		}
+		seen[phone] = struct{}{}
+		recipients = append(recipients, models.BulkMessageRecipient{
 			CampaignID:     id,
-			PhoneNumber:    rec.PhoneNumber,
+			PhoneNumber:    phone,
 			RecipientName:  rec.RecipientName,
 			TemplateParams: models.JSONB(rec.TemplateParams),
 			HeaderParams:   models.JSONB(rec.HeaderParams),
 			Status:         models.MessageStatusPending,
-		}
+		})
+	}
+	if len(recipients) == 0 {
+		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "No new recipients: every number is blank or already on the campaign", nil, "")
 	}
 
 	if err := a.DB.Create(&recipients).Error; err != nil {
@@ -1158,3 +1209,7 @@ func sanitizeFilename(name string) string {
 	}
 	return name
 }
+
+// maxRecipientsPerImport bounds one recipients import request so a single
+// call cannot hold the request for the whole 30 s client timeout.
+const maxRecipientsPerImport = 10000

@@ -82,7 +82,13 @@ test.describe('General Tab', () => {
   })
 
   test('should save general settings', async () => {
+    const originalName = await settingsPage.orgNameInput.inputValue()
     await settingsPage.fillOrgName('Test Organization')
+    await settingsPage.saveGeneralSettings()
+    await settingsPage.expectToast(/saved|success/i)
+
+    // Restore the name so a shared or local database is not left renamed.
+    await settingsPage.fillOrgName(originalName)
     await settingsPage.saveGeneralSettings()
     await settingsPage.expectToast(/saved|success/i)
   })

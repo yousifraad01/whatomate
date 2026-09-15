@@ -74,13 +74,19 @@ func (a *App) InitiateOutgoingCall(r *fastglue.Request) error {
 
 // HangupOutgoingCall handles POST /api/calls/outgoing/{id}/hangup
 func (a *App) HangupOutgoingCall(r *fastglue.Request) error {
-	_, userID, err := a.requireAuth(r, models.ResourceOutgoingCalls, models.ActionWrite)
+	orgID, userID, err := a.requireAuth(r, models.ResourceOutgoingCalls, models.ActionWrite)
 	if err != nil {
 		return nil
 	}
 
 	callLogID, err := parsePathUUID(r, "id", "call log")
 	if err != nil {
+		return nil
+	}
+
+	// The live-call registry is process-wide; make sure the call belongs to
+	// the caller's organization before touching it.
+	if _, err := findByIDAndOrg[models.CallLog](a.DB, r, callLogID, orgID, "Call log"); err != nil {
 		return nil
 	}
 
@@ -238,8 +244,10 @@ func (a *App) GetCallPermission(r *fastglue.Request) error {
 	ctx := r.RequestCtx
 	status, err := a.WhatsApp.GetCallPermission(ctx, waAccount, contact.PhoneNumber)
 	if err != nil {
-		a.Log.Error("Failed to check call permission via API", "error", err, "phone", contact.PhoneNumber)
-		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to check permission", nil, "")
+		// The failure is upstream (Meta), not ours: report it as a gateway
+		// error rather than a 500 so it is not counted as a server fault.
+		a.Log.Warn("Failed to check call permission via API", "error", err, "phone", contact.PhoneNumber)
+		return r.SendErrorEnvelope(fasthttp.StatusBadGateway, "Could not check call permission with WhatsApp", nil, "")
 	}
 
 	a.Log.Info("Call permission check result", "contact_id", contactID, "phone", contact.PhoneNumber, "status", status)

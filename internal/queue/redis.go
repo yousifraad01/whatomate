@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -23,6 +24,17 @@ const (
 
 	// ClaimMinIdleTime is the minimum idle time before claiming a pending message
 	ClaimMinIdleTime = 5 * time.Minute
+
+	// ClaimInterval is how often a running consumer looks for stale pending
+	// messages left behind by crashed workers. Claiming only at startup meant
+	// a job stuck in another consumer's pending list was never retried until
+	// the next restart.
+	ClaimInterval = time.Minute
+
+	// MaxDeliveries caps how many times one message is handed to a worker.
+	// A job that keeps failing (unmarshal error, deleted campaign) is dropped
+	// and logged after this many attempts instead of being retried forever.
+	MaxDeliveries = 5
 )
 
 // RedisQueue implements the Queue interface using Redis Streams
@@ -126,15 +138,24 @@ func NewRedisConsumer(client *redis.Client, log logf.Logger) (*RedisConsumer, er
 		consumerID: consumerID,
 	}
 
-	// Create consumer group if it doesn't exist
-	ctx := context.Background()
-	err := client.XGroupCreateMkStream(ctx, StreamName, ConsumerGroup, "0").Err()
-	if err != nil && err.Error() != "BUSYGROUP Consumer Group name already exists" {
-		return nil, fmt.Errorf("failed to create consumer group: %w", err)
+	if err := consumer.ensureGroup(context.Background()); err != nil {
+		return nil, err
 	}
 
 	log.Info("Redis consumer initialized", "consumer_id", consumerID)
 	return consumer, nil
+}
+
+// ensureGroup creates the stream and consumer group when they do not exist.
+// It is also used to recover when the stream is deleted while a consumer is
+// running (for example by an operator or a cache flush), which otherwise makes
+// every XREADGROUP fail with NOGROUP until the process is restarted.
+func (c *RedisConsumer) ensureGroup(ctx context.Context) error {
+	err := c.client.XGroupCreateMkStream(ctx, StreamName, ConsumerGroup, "0").Err()
+	if err != nil && !strings.HasPrefix(err.Error(), "BUSYGROUP") {
+		return fmt.Errorf("failed to create consumer group: %w", err)
+	}
+	return nil
 }
 
 // Consume starts consuming jobs from the queue
@@ -145,6 +166,7 @@ func (c *RedisConsumer) Consume(ctx context.Context, handler JobHandler) error {
 	if err := c.claimPendingMessages(ctx, handler); err != nil {
 		c.log.Warn("Failed to claim pending messages", "error", err)
 	}
+	lastClaim := time.Now()
 
 	for {
 		select {
@@ -152,6 +174,15 @@ func (c *RedisConsumer) Consume(ctx context.Context, handler JobHandler) error {
 			c.log.Info("Consumer shutting down")
 			return ctx.Err()
 		default:
+		}
+
+		// Periodically re-check for stale pending messages so a job orphaned
+		// by a crashed worker is retried while this consumer is running.
+		if time.Since(lastClaim) >= ClaimInterval {
+			if err := c.claimPendingMessages(ctx, handler); err != nil && ctx.Err() == nil {
+				c.log.Warn("Failed to claim pending messages", "error", err)
+			}
+			lastClaim = time.Now()
 		}
 
 		// Read new messages from the stream
@@ -171,7 +202,16 @@ func (c *RedisConsumer) Consume(ctx context.Context, handler JobHandler) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			c.log.Error("Failed to read from stream", "error", err)
+			if strings.HasPrefix(err.Error(), "NOGROUP") {
+				c.log.Warn("Stream or consumer group missing, recreating", "stream", StreamName, "group", ConsumerGroup)
+				if gerr := c.ensureGroup(ctx); gerr != nil {
+					c.log.Error("Failed to recreate consumer group", "error", gerr)
+				} else {
+					continue
+				}
+			} else {
+				c.log.Error("Failed to read from stream", "error", err)
+			}
 			time.Sleep(time.Second) // Back off on error
 			continue
 		}
@@ -185,12 +225,22 @@ func (c *RedisConsumer) Consume(ctx context.Context, handler JobHandler) error {
 				}
 
 				// Acknowledge the message
-				if err := c.client.XAck(ctx, StreamName, ConsumerGroup, msg.ID).Err(); err != nil {
+				if err := c.ack(msg.ID); err != nil {
 					c.log.Error("Failed to ACK message", "error", err, "message_id", msg.ID)
 				}
 			}
 		}
 	}
+}
+
+// ack acknowledges a processed message using a detached context, so a
+// shutdown that cancels the consumer context while a job is finishing cannot
+// leave the completed job pending in the stream (and therefore redelivered,
+// i.e. sent to the customer again, on the next start).
+func (c *RedisConsumer) ack(id string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return c.client.XAck(ctx, StreamName, ConsumerGroup, id).Err()
 }
 
 // claimPendingMessages claims stale pending messages from crashed workers
@@ -217,6 +267,17 @@ func (c *RedisConsumer) claimPendingMessages(ctx context.Context, handler JobHan
 
 	// Claim and process each pending message
 	for _, p := range pending {
+		// Drop poison messages instead of retrying them forever. The payload
+		// is logged so an operator can replay it once the cause is fixed.
+		if p.RetryCount > MaxDeliveries {
+			c.log.Error("Dropping message after too many delivery attempts",
+				"message_id", p.ID, "deliveries", p.RetryCount, "consumer", p.Consumer)
+			if err := c.ack(p.ID); err != nil {
+				c.log.Error("Failed to ACK poison message", "error", err, "message_id", p.ID)
+			}
+			continue
+		}
+
 		// Claim the message
 		messages, err := c.client.XClaim(ctx, &redis.XClaimArgs{
 			Stream:   StreamName,
@@ -238,7 +299,7 @@ func (c *RedisConsumer) claimPendingMessages(ctx context.Context, handler JobHan
 			}
 
 			// Acknowledge the message
-			if err := c.client.XAck(ctx, StreamName, ConsumerGroup, msg.ID).Err(); err != nil {
+			if err := c.ack(msg.ID); err != nil {
 				c.log.Error("Failed to ACK claimed message", "error", err, "message_id", msg.ID)
 			}
 		}

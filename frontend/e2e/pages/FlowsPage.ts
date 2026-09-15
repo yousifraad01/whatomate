@@ -12,7 +12,8 @@ export class FlowsPage extends BasePage {
 
   constructor(page: Page) {
     super(page)
-    this.heading = page.getByRole('heading', { name: /WhatsApp Flows/i })
+    // exact: the empty state renders a "No WhatsApp Flows yet" heading too
+    this.heading = page.getByRole('heading', { name: 'WhatsApp Flows', exact: true })
     this.createButton = page.getByRole('button', { name: /Create Flow/i }).first()
     this.syncButton = page.getByRole('button', { name: /Sync from Meta/i }).first()
     this.accountFilter = page.locator('button[role="combobox"]').first()

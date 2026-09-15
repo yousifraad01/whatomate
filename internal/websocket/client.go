@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"encoding/json"
+	"sync/atomic"
 	"time"
 
 	"github.com/fasthttp/websocket"
@@ -42,28 +43,36 @@ type Client struct {
 	userID         uuid.UUID
 	organizationID uuid.UUID
 
-	// Whether the client has authenticated
-	authenticated bool
+	// Whether the client has authenticated. Written by ReadPump and read by
+	// WritePump, hence atomic.
+	authenticated atomic.Bool
 
 	// Function to validate JWT tokens
 	authFn AuthenticateFn
 
-	// Current contact being viewed (nil if none)
-	currentContact *uuid.UUID
+	// Current contact being viewed (nil if none). Written by ReadPump when
+	// the client sends set_contact and read by the hub's broadcast loop.
+	currentContact atomic.Pointer[uuid.UUID]
+}
+
+// CurrentContact returns the contact the client is viewing, or nil.
+func (c *Client) CurrentContact() *uuid.UUID {
+	return c.currentContact.Load()
 }
 
 // NewClient creates a new unauthenticated Client instance.
 // The client must authenticate via a message-based auth flow before it can
 // send/receive application messages.
 func NewClient(hub *Hub, conn *websocket.Conn, userID, orgID uuid.UUID) *Client {
-	return &Client{
+	c := &Client{
 		hub:            hub,
 		conn:           conn,
 		send:           make(chan []byte, 256),
 		userID:         userID,
 		organizationID: orgID,
-		authenticated:  userID != uuid.Nil, // pre-authenticated if userID is set (tests)
 	}
+	c.authenticated.Store(userID != uuid.Nil) // pre-authenticated if userID is set (tests)
+	return c
 }
 
 // NewUnauthenticatedClient creates a client that requires message-based authentication.
@@ -82,7 +91,7 @@ func (c *Client) ReadPump() {
 		if r := recover(); r != nil {
 			c.hub.log.Error("Recovered from panic in ReadPump", "error", r, "user_id", c.userID)
 		}
-		if c.authenticated {
+		if c.authenticated.Load() {
 			c.hub.unregister <- c // Hub will close c.send
 		} else {
 			close(c.send) // Signal WritePump to exit for unauthenticated clients
@@ -95,7 +104,7 @@ func (c *Client) ReadPump() {
 	c.conn.SetReadLimit(maxMessageSize)
 
 	// If not yet authenticated, enforce auth timeout for the first message
-	if !c.authenticated {
+	if !c.authenticated.Load() {
 		_ = c.conn.SetReadDeadline(time.Now().Add(authTimeout))
 
 		_, message, err := c.conn.ReadMessage()
@@ -155,7 +164,7 @@ func (c *Client) WritePump() {
 			_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 
 			// Only forward messages if authenticated
-			if !c.authenticated {
+			if !c.authenticated.Load() {
 				continue
 			}
 
@@ -220,7 +229,7 @@ func (c *Client) handleAuthMessage(data []byte) bool {
 
 	c.userID = userID
 	c.organizationID = orgID
-	c.authenticated = true
+	c.authenticated.Store(true)
 
 	// Register with hub now that we're authenticated
 	c.hub.Register(c)
@@ -259,14 +268,14 @@ func (c *Client) handleSetContact(payload any) {
 	}
 
 	if setContact.ContactID == "" {
-		c.currentContact = nil
+		c.currentContact.Store(nil)
 		c.hub.log.Debug("Client cleared current contact", "user_id", c.userID)
 	} else {
 		contactID, err := uuid.Parse(setContact.ContactID)
 		if err != nil {
 			return
 		}
-		c.currentContact = &contactID
+		c.currentContact.Store(&contactID)
 		c.hub.log.Debug("Client set current contact",
 			"user_id", c.userID,
 			"contact_id", contactID)

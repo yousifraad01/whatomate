@@ -38,7 +38,9 @@ export function useUnsavedChangesGuard(hasChanges: Ref<boolean>) {
     hasChanges.value = false
     cleanup()
     if (target) {
-      window.location.href = target
+      // Navigate through the router so the configured base path is kept and
+      // the app is not reloaded.
+      router.push(target)
     }
   }
 

@@ -74,6 +74,9 @@ export const useAuthStore = defineStore('auth', () => {
     // Org override is per-session: leaving it behind makes the next user on this
     // browser send X-Organization-ID for an org they may not belong to.
     localStorage.removeItem('selected_organization_id')
+    // Break timing belongs to the signed-out session, not the next one.
+    localStorage.removeItem('break_started_at')
+    breakStartedAt.value = null
   }
 
   /**

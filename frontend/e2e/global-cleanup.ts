@@ -32,7 +32,7 @@ const E2E_NAME_PREDICATE = `(name LIKE 'E2E-%' OR name LIKE 'E2E %')`
 // @test.com with an `e2e-` prefix; we match those too. Stable seeded users
 // (admin@test.com, manager@test.com, agent@test.com) don't have the
 // `e2e-` prefix so they're never touched.
-const E2E_USER_EMAIL_PREDICATE = `(email LIKE '%@e2e.test' OR email LIKE 'e2e-%@test.com')`
+const E2E_USER_EMAIL_PREDICATE = `(email LIKE '%@e2e.test' OR email LIKE 'e2e-%@test.com' OR email ~ '^[a-z0-9]+-[0-9]{13}-[0-9a-f]{6}@test[.]com$')`
 
 // Statements run sequentially. Each is best-effort: a failure logs and
 // the loop continues. Phrased as "DELETE ... USING <child>" or scoped to

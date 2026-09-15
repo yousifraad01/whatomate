@@ -1,13 +1,26 @@
 import { type ClassValue, clsx } from 'clsx'
 import { twMerge } from 'tailwind-merge'
+import { getLocale } from '@/i18n'
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+/**
+ * Active UI locale for Intl formatting. Falls back to the browser default when
+ * i18n is not initialised yet (e.g. unit tests running outside the app).
+ */
+export function currentLocale(): string | undefined {
+  try {
+    return getLocale()
+  } catch {
+    return undefined
+  }
+}
+
 export function formatDate(date: string | Date, options?: Intl.DateTimeFormatOptions): string {
   const d = typeof date === 'string' ? new Date(date) : date
-  return d.toLocaleDateString('en-US', {
+  return d.toLocaleDateString(currentLocale(), {
     year: 'numeric',
     month: 'short',
     day: 'numeric',
@@ -17,10 +30,14 @@ export function formatDate(date: string | Date, options?: Intl.DateTimeFormatOpt
 
 export function formatTime(date: string | Date): string {
   const d = typeof date === 'string' ? new Date(date) : date
-  return d.toLocaleTimeString('en-US', {
+  return d.toLocaleTimeString(currentLocale(), {
     hour: '2-digit',
     minute: '2-digit'
   })
+}
+
+export function formatNumber(value: number, options?: Intl.NumberFormatOptions): string {
+  return new Intl.NumberFormat(currentLocale(), options).format(value)
 }
 
 export function formatDateTime(date: string | Date): string {

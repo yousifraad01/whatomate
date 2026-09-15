@@ -147,14 +147,14 @@ func (a *App) ListContacts(r *fastglue.Request) error {
 	// Check if phone masking is enabled
 	shouldMask := a.ShouldMaskPhoneNumbers(orgID)
 
+	// Unread counts for the whole page in one grouped query instead of one
+	// COUNT per contact (N+1).
+	unreadByContact := a.unreadCountsByContact(contacts)
+
 	// Convert to response format
 	response := make([]ContactResponse, len(contacts))
 	for i, c := range contacts {
-		// Count unread messages
-		var unreadCount int64
-		a.DB.Model(&models.Message{}).
-			Where("contact_id = ? AND direction = ? AND status != ?", c.ID, models.DirectionIncoming, models.MessageStatusRead).
-			Count(&unreadCount)
+		unreadCount := unreadByContact[c.ID]
 
 		tags := []string{}
 		if c.Tags != nil {
@@ -215,6 +215,37 @@ func (a *App) scopeAssignedContact(query *gorm.DB, userID, orgID uuid.UUID) *gor
 			Select("contact_id").
 			Where("agent_id = ? AND organization_id = ? AND status = ?", userID, orgID, models.TransferStatusActive),
 	)
+}
+
+// unreadCountsByContact returns the number of unread incoming messages for
+// each of the given contacts, using a single GROUP BY query.
+func (a *App) unreadCountsByContact(contacts []models.Contact) map[uuid.UUID]int64 {
+	counts := make(map[uuid.UUID]int64, len(contacts))
+	if len(contacts) == 0 {
+		return counts
+	}
+
+	ids := make([]uuid.UUID, len(contacts))
+	for i, c := range contacts {
+		ids[i] = c.ID
+	}
+
+	var rows []struct {
+		ContactID uuid.UUID
+		Count     int64
+	}
+	if err := a.DB.Model(&models.Message{}).
+		Select("contact_id, COUNT(*) AS count").
+		Where("contact_id IN ? AND direction = ? AND status != ?", ids, models.DirectionIncoming, models.MessageStatusRead).
+		Group("contact_id").
+		Scan(&rows).Error; err != nil {
+		a.Log.Error("Failed to count unread messages", "error", err)
+		return counts
+	}
+	for _, row := range rows {
+		counts[row.ContactID] = row.Count
+	}
+	return counts
 }
 
 // GetContact returns a single contact
@@ -442,9 +473,9 @@ func (a *App) buildMessagesResponse(messages []models.Message) []MessageResponse
 // Called from the frontend when a new message arrives for the chat the
 // user is currently viewing, so the sidebar unread badge stays at zero.
 func (a *App) MarkContactRead(r *fastglue.Request) error {
-	orgID, userID, err := a.getOrgAndUserID(r)
+	orgID, userID, err := a.requireAuth(r, models.ResourceChat, models.ActionRead)
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
+		return nil
 	}
 	contactID, err := parsePathUUID(r, "id", "contact")
 	if err != nil {
@@ -545,9 +576,9 @@ type ButtonContent struct {
 // SendMessage sends a message to a contact
 // Agents can only send messages to their assigned contacts
 func (a *App) SendMessage(r *fastglue.Request) error {
-	orgID, userID, err := a.getOrgAndUserID(r)
+	orgID, userID, err := a.requireAuth(r, models.ResourceChat, models.ActionWrite)
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
+		return nil
 	}
 	contactID, err := parsePathUUID(r, "id", "contact")
 	if err != nil {
@@ -747,9 +778,9 @@ func truncateString(s string, maxLen int) string {
 
 // SendMediaMessage sends a media message (image, document, video, audio) to a contact
 func (a *App) SendMediaMessage(r *fastglue.Request) error {
-	orgID, userID, err := a.getOrgAndUserID(r)
+	orgID, userID, err := a.requireAuth(r, models.ResourceChat, models.ActionWrite)
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
+		return nil
 	}
 
 	// Parse multipart form
@@ -932,9 +963,9 @@ type SendReactionRequest struct {
 
 // SendReaction sends a reaction to a message
 func (a *App) SendReaction(r *fastglue.Request) error {
-	orgID, userID, err := a.getOrgAndUserID(r)
+	orgID, userID, err := a.requireAuth(r, models.ResourceChat, models.ActionWrite)
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
+		return nil
 	}
 	contactID, err := parsePathUUID(r, "id", "contact")
 	if err != nil {
@@ -1131,10 +1162,9 @@ func (a *App) AssignContact(r *fastglue.Request) error {
 		return nil
 	}
 
-	// If assigning to a user, verify they exist in the same org
+	// If assigning to a user, verify they are a member of the org (native or cross-org)
 	if req.UserID != nil {
-		var user models.User
-		if err := a.DB.Where("id = ? AND organization_id = ?", req.UserID, orgID).First(&user).Error; err != nil {
+		if _, err := a.findOrgUser(*req.UserID, orgID); err != nil {
 			return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "User not found", nil, "")
 		}
 	}
@@ -1484,8 +1514,7 @@ func (a *App) UpdateContact(r *fastglue.Request) error {
 	if req.ClearAssignedAgent != nil && *req.ClearAssignedAgent {
 		updates["assigned_user_id"] = nil
 	} else if req.AssignedUserID != nil {
-		var user models.User
-		if err := a.DB.Where("id = ? AND organization_id = ?", req.AssignedUserID, orgID).First(&user).Error; err != nil {
+		if _, err := a.findOrgUser(*req.AssignedUserID, orgID); err != nil {
 			return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Assigned user not found", nil, "")
 		}
 		updates["assigned_user_id"] = req.AssignedUserID

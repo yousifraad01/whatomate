@@ -51,6 +51,18 @@ func UserAwareRateLimit(opts RateLimitOpts) fastglue.FastMiddleware {
 	}
 }
 
+// rateLimitScript increments the window counter and (re)arms its expiry in one
+// atomic step. A separate INCR + EXPIRE pair could be interrupted between the
+// two commands, leaving a counter that never expires and permanently blocks
+// the client once it crosses the limit; the TTL check also repairs any such
+// key left behind by an older version.
+var rateLimitScript = redis.NewScript(`
+local c = redis.call('INCR', KEYS[1])
+if c == 1 or redis.call('TTL', KEYS[1]) < 0 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return c`)
+
 // enforce applies the fixed-window limit for an already-computed key. It writes
 // a 429 envelope and returns nil when the limit is exceeded, returns the request
 // unchanged otherwise, and fails open (allows the request) if Redis is down.
@@ -58,18 +70,12 @@ func enforce(opts RateLimitOpts, r *fastglue.Request, key string) *fastglue.Requ
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	count, err := opts.Redis.Incr(ctx, key).Result()
+	windowSecs := max(int(opts.Window.Seconds()), 1)
+	count, err := rateLimitScript.Run(ctx, opts.Redis, []string{key}, windowSecs).Int64()
 	if err != nil {
 		// Fail open — log and allow request.
 		opts.Log.Error("Rate limit Redis INCR failed", "error", err, "key", key)
 		return r
-	}
-
-	// Set expiry on first increment (new window).
-	if count == 1 {
-		if err := opts.Redis.Expire(ctx, key, opts.Window).Err(); err != nil {
-			opts.Log.Error("Rate limit Redis EXPIRE failed", "error", err, "key", key)
-		}
 	}
 
 	if count > int64(opts.Max) {

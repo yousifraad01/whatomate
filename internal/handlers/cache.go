@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -314,7 +315,9 @@ func (a *App) getSLAEnabledSettingsCached() ([]models.ChatbotSettings, error) {
 
 	// Cache miss - fetch from database
 	var settings []models.ChatbotSettings
-	if err := a.DB.Where("sla_enabled = ?", true).Find(&settings).Error; err != nil {
+	// Client-inactivity reminders and auto-close are independent toggles;
+	// they must run even when the SLA block itself is switched off.
+	if err := a.DB.Where("sla_enabled = ? OR client_reminder_enabled = ?", true, true).Find(&settings).Error; err != nil {
 		return nil, err
 	}
 
@@ -426,6 +429,12 @@ func (a *App) getUserPermissionsCached(userID uuid.UUID, orgIDs ...uuid.UUID) (*
 	if err := a.DB.Where("id = ?", userID).First(&user).Error; err != nil {
 		return nil, err
 	}
+	// A deactivated user must lose access as soon as the cache is refreshed,
+	// not when their access token happens to expire. Refusing here (and never
+	// caching a result for the user) makes every permission check deny.
+	if !user.IsActive {
+		return nil, errUserInactive
+	}
 
 	// Determine which role to use. For a specific org the role has to come from
 	// that org's membership row — falling back to users.role_id would carry the
@@ -498,7 +507,11 @@ func (a *App) getUserPermissionsCached(userID uuid.UUID, orgIDs ...uuid.UUID) (*
 func (a *App) HasPermission(userID uuid.UUID, resource, action string, orgIDs ...uuid.UUID) bool {
 	perms, err := a.getUserPermissionsCached(userID, orgIDs...)
 	if err != nil {
-		a.Log.Error("Failed to get user permissions", "error", err, "user_id", userID)
+		if errors.Is(err, errUserInactive) {
+			a.Log.Debug("Permission denied for deactivated user", "user_id", userID)
+		} else {
+			a.Log.Error("Failed to get user permissions", "error", err, "user_id", userID)
+		}
 		return false
 	}
 

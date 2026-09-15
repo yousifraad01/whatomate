@@ -1,13 +1,16 @@
 <script setup lang="ts" generic="T extends Record<string, any>">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import {
   Table,
   TableBody,
+  TableCaption,
   TableCell,
   TableHead,
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import { EmptyState } from '@/components/ui/empty-state'
 import { ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-vue-next'
 import { Skeleton } from '@/components/ui/skeleton'
 import PaginationControls from './PaginationControls.vue'
@@ -21,6 +24,8 @@ const props = withDefaults(defineProps<{
   emptyIcon?: Component
   emptyTitle?: string
   emptyDescription?: string
+  /** Accessible table description (rendered visually hidden) */
+  caption?: string
   // Sorting
   sortKey?: string
   sortDirection?: 'asc' | 'desc'
@@ -58,12 +63,28 @@ defineSlots<{
   'empty-action': () => any
 }>()
 
+const { t } = useI18n()
+
 const hasSortableColumns = computed(() => props.columns.some(col => col.sortable))
+
+function columnSortKey(column: Column<T>): string {
+  return column.sortKey || column.key
+}
+
+function isSortedBy(column: Column<T>): boolean {
+  return !!column.sortable && props.sortKey === columnSortKey(column)
+}
+
+function ariaSort(column: Column<T>): 'ascending' | 'descending' | 'none' | undefined {
+  if (!column.sortable) return undefined
+  if (!isSortedBy(column)) return 'none'
+  return props.sortDirection === 'asc' ? 'ascending' : 'descending'
+}
 
 function handleSort(column: Column<T>) {
   if (!column.sortable) return
 
-  const sortKey = column.sortKey || column.key
+  const sortKey = columnSortKey(column)
   let newDirection: 'asc' | 'desc' = 'desc'
 
   if (props.sortKey === sortKey) {
@@ -148,50 +169,51 @@ function getRowKey(item: T, index: number): string {
 <template>
   <div :class="maxHeight ? 'overflow-auto' : ''" :style="maxHeight ? { maxHeight } : {}">
   <Table>
+    <TableCaption v-if="caption" class="sr-only">{{ caption }}</TableCaption>
     <TableHeader>
-      <TableRow>
+      <TableRow class="hover:bg-transparent">
         <TableHead
           v-for="col in columns"
           :key="col.key"
+          :aria-sort="ariaSort(col)"
           :class="[
             col.width,
             col.align === 'right' && 'text-right',
             col.align === 'center' && 'text-center',
-            col.sortable && 'cursor-pointer select-none hover:text-foreground transition-colors',
           ]"
-          @click="handleSort(col)"
         >
-          <div
+          <!-- Sortable headers are real buttons so they work from the keyboard and
+               expose their state through aria-sort on the header cell. -->
+          <button
+            v-if="col.sortable"
+            type="button"
             :class="[
-              'flex items-center gap-1',
-              col.align === 'right' && 'justify-end',
+              // Fill the whole header cell so the click target is the full column header.
+              'flex h-full w-full items-center gap-1 rounded-sm uppercase tracking-wide transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+              isSortedBy(col) && 'text-foreground',
+              col.align === 'right' && 'flex-row-reverse',
               col.align === 'center' && 'justify-center',
             ]"
+            :aria-label="t('common.sortBy', { column: col.label })"
+            @click="handleSort(col)"
           >
             {{ col.label }}
-            <template v-if="col.sortable">
-              <ArrowUp
-                v-if="sortKey === (col.sortKey || col.key) && sortDirection === 'asc'"
-                class="h-3 w-3"
-              />
-              <ArrowDown
-                v-else-if="sortKey === (col.sortKey || col.key) && sortDirection === 'desc'"
-                class="h-3 w-3"
-              />
-              <ArrowUpDown v-else class="h-3 w-3 opacity-30" />
-            </template>
-          </div>
+            <ArrowUp v-if="isSortedBy(col) && sortDirection === 'asc'" class="h-3 w-3" aria-hidden="true" />
+            <ArrowDown v-else-if="isSortedBy(col) && sortDirection === 'desc'" class="h-3 w-3" aria-hidden="true" />
+            <ArrowUpDown v-else class="h-3 w-3 opacity-40" aria-hidden="true" />
+          </button>
+          <span v-else>{{ col.label }}</span>
         </TableHead>
       </TableRow>
     </TableHeader>
     <TableBody>
       <!-- Loading State - Skeleton Rows -->
       <template v-if="isLoading">
-        <TableRow v-for="row in 5" :key="`skeleton-${row}`">
+        <TableRow v-for="row in 5" :key="`skeleton-${row}`" aria-hidden="true">
           <TableCell v-for="col in columns" :key="`skeleton-${row}-${col.key}`">
             <Skeleton
               :class="[
-                'h-4 skeleton-shimmer',
+                'h-4',
                 col.key === 'actions' ? 'w-16' : row % 3 === 0 ? 'w-3/4' : row % 3 === 1 ? 'w-1/2' : 'w-2/3',
               ]"
             />
@@ -200,17 +222,14 @@ function getRowKey(item: T, index: number): string {
       </template>
 
       <!-- Empty State -->
-      <TableRow v-else-if="sortedItems.length === 0">
-        <TableCell :colspan="columns.length" class="h-24 text-center text-muted-foreground">
+      <TableRow v-else-if="sortedItems.length === 0" class="hover:bg-transparent">
+        <TableCell :colspan="columns.length" class="p-0">
           <slot name="empty">
-            <div v-if="emptyIcon" class="mb-3 mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-primary/10 to-primary/5 ring-1 ring-primary/10">
-              <component :is="emptyIcon" class="h-7 w-7 text-primary/60" />
-            </div>
-            <p v-if="emptyTitle">{{ emptyTitle }}</p>
-            <p v-if="emptyDescription" class="text-sm">{{ emptyDescription }}</p>
-            <div class="mt-3">
-              <slot name="empty-action" />
-            </div>
+            <EmptyState :icon="emptyIcon" :title="emptyTitle" :description="emptyDescription" class="py-10">
+              <template v-if="$slots['empty-action']" #action>
+                <slot name="empty-action" />
+              </template>
+            </EmptyState>
           </slot>
         </TableCell>
       </TableRow>
@@ -235,7 +254,7 @@ function getRowKey(item: T, index: number): string {
   </div>
 
   <!-- Server-side Pagination -->
-  <div v-if="needsPagination && !isLoading" class="border-t px-4 py-3">
+  <div v-if="needsPagination && !isLoading" class="border-t border-border px-4 py-3">
     <PaginationControls
       :current-page="currentPage"
       :total-pages="totalPages"

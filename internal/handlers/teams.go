@@ -401,10 +401,11 @@ func (a *App) AddTeamMember(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid user ID", nil, "")
 	}
 
-	// Verify user exists in org
-	user, err := findByIDAndOrg[models.User](a.DB, r, memberUserID, orgID, "User")
+	// Verify the user is a member of the org (native or cross-org member;
+	// the user list offers both kinds)
+	user, err := a.findOrgUser(memberUserID, orgID)
 	if err != nil {
-		return nil
+		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "User not found", nil, "")
 	}
 
 	// Check if already a member

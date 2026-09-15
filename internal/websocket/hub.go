@@ -25,6 +25,10 @@ type Hub struct {
 	// mutex for thread-safe access to clients map
 	mu sync.RWMutex
 
+	// stop is closed by Stop to end the Run loop
+	stop     chan struct{}
+	stopOnce sync.Once
+
 	// logger
 	log logf.Logger
 }
@@ -36,11 +40,12 @@ func NewHub(log logf.Logger) *Hub {
 		broadcast:  make(chan BroadcastMessage, 256),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
+		stop:       make(chan struct{}),
 		log:        log,
 	}
 }
 
-// Run starts the hub's main loop
+// Run starts the hub's main loop. It returns after Stop is called.
 func (h *Hub) Run() {
 	for {
 		select {
@@ -52,8 +57,16 @@ func (h *Hub) Run() {
 
 		case message := <-h.broadcast:
 			h.broadcastMessage(message)
+
+		case <-h.stop:
+			return
 		}
 	}
+}
+
+// Stop ends the Run loop. It is safe to call more than once.
+func (h *Hub) Stop() {
+	h.stopOnce.Do(func() { close(h.stop) })
 }
 
 // registerClient adds a client to the hub
@@ -152,7 +165,7 @@ func (h *Hub) broadcastMessage(msg BroadcastMessage) {
 		// Iterate through all clients (tabs) for each user
 		for client := range userClients {
 			// If ContactID is specified, only send to clients viewing that contact
-			if msg.ContactID != uuid.Nil && client.currentContact != nil && *client.currentContact != msg.ContactID {
+			if cc := client.currentContact.Load(); msg.ContactID != uuid.Nil && cc != nil && *cc != msg.ContactID {
 				continue
 			}
 

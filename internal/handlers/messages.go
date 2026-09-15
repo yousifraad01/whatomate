@@ -654,12 +654,57 @@ type SendTemplateMessageRequest struct {
 	HeaderParams map[string]string `json:"header_params"`
 }
 
+// maxHeaderMediaBytes caps header media fetched from a user-supplied URL.
+// Meta's own limit for video headers is 16 MB; larger documents are uploaded
+// through the multipart path, which the server body limit already bounds.
+const maxHeaderMediaBytes = 32 << 20
+
+// downloadHeaderMedia fetches template header media from an external URL
+// using the shared SSRF-safe HTTP client. It returns the body and its
+// Content-Type, refusing bodies larger than maxHeaderMediaBytes.
+func (a *App) downloadHeaderMedia(rawURL string) ([]byte, string, error) {
+	if a.HTTPClient == nil {
+		return nil, "", fmt.Errorf("outbound HTTP client is not configured")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	resp, err := a.HTTPClient.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("URL returned status %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxHeaderMediaBytes+1))
+	if err != nil {
+		return nil, "", err
+	}
+	if len(data) > maxHeaderMediaBytes {
+		return nil, "", fmt.Errorf("media exceeds the %d MB limit", maxHeaderMediaBytes>>20)
+	}
+
+	mimeType := resp.Header.Get("Content-Type")
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	return data, mimeType, nil
+}
+
 // SendTemplateMessage sends a template message to a contact or phone number.
 // Accepts either JSON body or multipart/form-data (when a header media file is included).
 func (a *App) SendTemplateMessage(r *fastglue.Request) error {
-	orgID, userID, err := a.getOrgAndUserID(r)
+	orgID, userID, err := a.requireAuth(r, models.ResourceChat, models.ActionWrite)
 	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
+		return nil
 	}
 
 	var req SendTemplateMessageRequest
@@ -776,11 +821,13 @@ func (a *App) SendTemplateMessage(r *fastglue.Request) error {
 		if err != nil {
 			return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid contact_id", nil, "")
 		}
-		c, err := findByIDAndOrg[models.Contact](a.DB, r, cID, orgID, "Contact")
-		if err != nil {
-			return nil
+		// Agents may only message contacts assigned to them (same rule as
+		// SendMessage); users with contacts:read may message any contact.
+		var c models.Contact
+		if err := a.scopeAssignedContact(a.DB.Where("id = ? AND organization_id = ?", cID, orgID), userID, orgID).First(&c).Error; err != nil {
+			return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Contact not found", nil, "")
 		}
-		contact = c
+		contact = &c
 	} else {
 		// Find or create contact from phone number
 		phoneNumber := req.PhoneNumber
@@ -864,24 +911,20 @@ func (a *App) SendTemplateMessage(r *fastglue.Request) error {
 			// Option 1: Pre-uploaded WhatsApp media ID — use directly (no local preview)
 			headerMediaID = req.HeaderMediaID
 		} else if req.HeaderMediaURL != "" {
-			// Option 2: Download from URL, then upload to WhatsApp
-			resp, err := http.Get(req.HeaderMediaURL)
+			// Option 2: Download from URL, then upload to WhatsApp. The URL is
+			// user-supplied, so it is validated and fetched through the
+			// SSRF-safe shared client with a bounded body instead of
+			// http.Get + io.ReadAll.
+			if err := validateWebhookURL(req.HeaderMediaURL); err != nil {
+				return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid header media URL: "+err.Error(), nil, "")
+			}
+			data, mimeType, err := a.downloadHeaderMedia(req.HeaderMediaURL)
 			if err != nil {
-				return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Failed to download header media from URL", nil, "")
+				a.Log.Warn("Failed to download header media from URL", "error", err)
+				return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Failed to download header media from URL: "+err.Error(), nil, "")
 			}
-			defer resp.Body.Close() //nolint:errcheck
-			if resp.StatusCode != http.StatusOK {
-				return r.SendErrorEnvelope(fasthttp.StatusBadRequest, fmt.Sprintf("Header media URL returned status %d", resp.StatusCode), nil, "")
-			}
-			headerMediaData, err = io.ReadAll(resp.Body)
-			if err != nil {
-				a.Log.Error("Failed to read header media from URL", "error", err)
-				return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to read header media from URL", nil, "")
-			}
-			headerMimeType = resp.Header.Get("Content-Type")
-			if headerMimeType == "" {
-				headerMimeType = "application/octet-stream"
-			}
+			headerMediaData = data
+			headerMimeType = mimeType
 		} else if len(headerFileData) > 0 {
 			// Option 3: Multipart file upload
 			headerMediaData = headerFileData

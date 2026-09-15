@@ -386,7 +386,31 @@ func UniqueEmail(prefix string) string {
 
 // --- JWT ---
 
-// GenerateTestRefreshToken creates a valid refresh token for testing.
+// GenerateTestAccessToken creates a valid access token (no JTI) for testing.
+func GenerateTestAccessToken(t *testing.T, user *models.User, secret string, expiry time.Duration) string {
+	t.Helper()
+
+	claims := middleware.JWTClaims{
+		UserID:         user.ID,
+		OrganizationID: user.OrganizationID,
+		Email:          user.Email,
+		RoleID:         user.RoleID,
+		IsSuperAdmin:   user.IsSuperAdmin,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(expiry)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			Issuer:    "whatomate",
+		},
+	}
+
+	tokenString, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(secret))
+	require.NoError(t, err)
+	return tokenString
+}
+
+// GenerateTestRefreshToken creates a valid refresh token for testing. Like
+// tokens issued by the server it carries a random JTI; tests that expect the
+// refresh to succeed must register that JTI in Redis (see SeedRefreshToken).
 func GenerateTestRefreshToken(t *testing.T, user *models.User, secret string, expiry time.Duration) string {
 	t.Helper()
 
@@ -396,6 +420,7 @@ func GenerateTestRefreshToken(t *testing.T, user *models.User, secret string, ex
 		Email:          user.Email,
 		RoleID:         user.RoleID,
 		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        uuid.New().String(),
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(expiry)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			Issuer:    "whatomate",

@@ -6,7 +6,13 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/shridarpatil/whatomate/internal/safehttp"
 )
+
+// callbackTransport dials through the SSRF guard: callback URLs are
+// tenant-configured and must not reach internal services.
+var callbackTransport = safehttp.NewTransport()
 
 // HTTPCallbackResult holds the response from an HTTP callback.
 type HTTPCallbackResult struct {
@@ -34,7 +40,7 @@ func executeHTTPCallback(url, method string, headers map[string]string, body str
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	client := &http.Client{Timeout: timeout}
+	client := &http.Client{Timeout: timeout, Transport: callbackTransport}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("http request: %w", err)
