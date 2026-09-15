@@ -19,6 +19,22 @@ services:
         condition: service_healthy
     environment:
       - TZ=Etc/UTC
+      # Runtime hardening. WHATOMATE_<SECTION>__<KEY> overrides the mounted
+      # config.toml, so the deployment's security posture is reviewable in
+      # version control instead of living only in a hosting panel.
+      #
+      # production also forces Secure auth cookies and quiets debug logging.
+      # It refuses to start when the CORS allow list below is empty, so the
+      # two always travel together.
+      - WHATOMATE_APP__ENVIRONMENT=${WHATOMATE_ENVIRONMENT:-production}
+      - WHATOMATE_SERVER__ALLOWED_ORIGINS=${WHATOMATE_ALLOWED_ORIGINS:-https://whatomate.iraqedu.org}
+      # Accounts are created by administrators. Open registration only needs an
+      # organization id, which is not secret (it travels in tokens and webhook
+      # payloads), and it grants the default role read access to conversations.
+      - WHATOMATE_APP__DISABLE_SELF_REGISTRATION=${WHATOMATE_DISABLE_SELF_REGISTRATION:-true}
+      # Throttle credential endpoints: login and register 10/min, refresh
+      # 30/min, and 200/min per user across the API.
+      - WHATOMATE_RATE_LIMIT__ENABLED=${WHATOMATE_RATE_LIMIT_ENABLED:-true}
     volumes:
       - ../files/config.toml:/app/config.toml:ro
       - whatomate-uploads:/app/uploads
