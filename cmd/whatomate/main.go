@@ -23,6 +23,7 @@ import (
 	"github.com/shridarpatil/whatomate/internal/frontend"
 	"github.com/shridarpatil/whatomate/internal/handlers"
 	"github.com/shridarpatil/whatomate/internal/middleware"
+	"github.com/shridarpatil/whatomate/internal/models"
 	"github.com/shridarpatil/whatomate/internal/queue"
 	"github.com/shridarpatil/whatomate/internal/storage"
 	"github.com/shridarpatil/whatomate/internal/tts"
@@ -32,6 +33,8 @@ import (
 	"github.com/valyala/fasthttp"
 	"github.com/zerodha/fastglue"
 	"github.com/zerodha/logf"
+	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
 
 var (
@@ -147,9 +150,6 @@ func runServer(args []string) {
 		if cfg.App.EncryptionKey == "" {
 			lo.Error("app.encryption_key is empty: WhatsApp tokens, app secrets and API keys are stored unencrypted. Set a 32+ character key.")
 		}
-		if cfg.DefaultAdmin.Password == "admin" {
-			lo.Error("default_admin.password is the well-known default; change the admin password if that account still uses it.")
-		}
 	}
 
 	// Warn if debug mode is on in production
@@ -188,6 +188,10 @@ func runServer(args []string) {
 		if err := handlers.BackfillChatbotFlowGraph(db, lo); err != nil {
 			lo.Fatal("Chatbot flow graph backfill failed", "error", err)
 		}
+	}
+
+	if cfg.App.Environment == "production" {
+		warnIfAdminUsesDefaultPassword(db, cfg.DefaultAdmin.Email, lo)
 	}
 
 	// Connect to Redis
@@ -1031,4 +1035,37 @@ func randomHex(n int) string {
 		panic("crypto/rand failed: " + err.Error())
 	}
 	return hex.EncodeToString(b)
+}
+
+// defaultAdminPassword is the administrator password shipped in
+// config.example.toml.
+const defaultAdminPassword = "admin"
+
+// warnIfAdminUsesDefaultPassword reports the condition that actually matters:
+// the administrator account exists and still authenticates with the
+// well-known default password.
+//
+// This replaces a check against the configured string, which logged an error
+// on every boot once the account's password had been rotated out of band, and
+// which stayed silent in the opposite case where the config had been edited
+// but the live account still used the default.
+func warnIfAdminUsesDefaultPassword(db *gorm.DB, email string, lo logf.Logger) {
+	if adminUsesDefaultPassword(db, email) {
+		lo.Error("Administrator account still uses the well-known default password; change it now.", "email", email)
+	}
+}
+
+// adminUsesDefaultPassword reports whether the named account exists and its
+// stored hash matches the default password.
+func adminUsesDefaultPassword(db *gorm.DB, email string) bool {
+	if email == "" {
+		return false
+	}
+	var user models.User
+	if err := db.Where("email = ?", email).First(&user).Error; err != nil {
+		// No such account: the configured password is only a seed value for a
+		// future first-run install, not a live credential.
+		return false
+	}
+	return bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(defaultAdminPassword)) == nil
 }
